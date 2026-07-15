@@ -40,7 +40,7 @@ $EDITOR .env
 | Key             | Purpose                                                              |
 | --------------- | -------------------------------------------------------------------- |
 | `UDM_HOST`      | UniFi controller hostname or IP (default: `unifi.local`)             |
-| `UNIFI_API_KEY` | API key. Optional — falls back to `pass network/unifi/api-key` if unset |
+| `UNIFI_API_KEY` | API key. Optional — falls back to `pass internal/unifi/api-key` if unset |
 
 Real environment variables always take precedence over the `.env` file, and a
 runtime `--host` flag wins over both:
@@ -50,7 +50,7 @@ python udm.py --host 192.168.1.1 status
 ```
 
 **API key alternatives.** Instead of `UNIFI_API_KEY` in `.env`, you can store it in
-[`pass`](https://www.passwordstore.org/) under `network/unifi/api-key` (the script
+[`pass`](https://www.passwordstore.org/) under `internal/unifi/api-key` (the script
 will fetch it automatically), or export `UNIFI_API_KEY` in your shell profile.
 
 ## Usage

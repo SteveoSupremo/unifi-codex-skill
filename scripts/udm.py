@@ -6,7 +6,7 @@ Configuration is read from a `.env` file at the project root (see `.env.example`
 or from environment variables. Real environment variables take precedence over
 the .env file. Supported keys:
   UDM_HOST         UniFi controller hostname (default: unifi.local)
-  UNIFI_API_KEY    API key; if unset, falls back to `pass network/unifi/api-key`
+  UNIFI_API_KEY    API key; if unset, falls back to `pass internal/unifi/api-key`
 
 Usage: python udm.py <command> [subcommand] [args] [--json]
 
@@ -61,7 +61,7 @@ def get_api_key() -> str:
     if env_key:
         return env_key
     result = subprocess.run(
-        ["pass", "network/unifi/api-key"],
+        ["pass", "internal/unifi/api-key"],
         capture_output=True, text=True, check=True
     )
     return result.stdout.strip()

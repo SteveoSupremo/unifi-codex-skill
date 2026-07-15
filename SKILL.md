@@ -20,7 +20,7 @@ curl calls unless `udm.py raw` is insufficient.
 
 **Script path:** `~/.claude/skills/unifi/scripts/udm.py`
 
-The script fetches the API key from the `UNIFI_API_KEY` env var or `pass network/unifi/api-key`
+The script fetches the API key from the `UNIFI_API_KEY` env var or `pass internal/unifi/api-key`
 automatically. No manual credential handling needed.
 
 ```bash
