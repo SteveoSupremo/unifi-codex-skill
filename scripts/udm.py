@@ -20,6 +20,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import warnings
 from pathlib import Path
 from typing import Any
@@ -89,8 +90,9 @@ class UDMClient:
     def _integration(self, path: str) -> str:
         return f"{self.base}/proxy/network/integration/v1/{path}"
 
-    def _request(self, method: str, url: str, body: dict | None = None) -> Any:
-        data = json.dumps(body).encode() if body else None
+    def _request(self, method: str, url: str, body: dict | None = None,
+                 unwrap: bool = True) -> Any:
+        data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(url, data=data, headers=self.headers, method=method)
         try:
             with urllib.request.urlopen(req, context=self.ctx) as resp:
@@ -99,7 +101,7 @@ class UDMClient:
                     return {}
                 parsed = json.loads(raw)
                 # Unwrap legacy API envelope
-                if isinstance(parsed, dict) and "data" in parsed:
+                if unwrap and isinstance(parsed, dict) and "data" in parsed:
                     return parsed["data"]
                 return parsed
         except urllib.error.HTTPError as e:
@@ -161,7 +163,8 @@ class UDMClient:
         if not sites:
             return []
         site_id = sites[0].get("id", self.site) if isinstance(sites, list) else self.site
-        return self.get(self._integration(f"sites/{site_id}/vlans"))
+        # Integration API renamed vlans -> networks
+        return self.get(self._integration(f"sites/{site_id}/networks"))
 
     def wlans(self) -> Any:
         return self.get(self._legacy("rest/wlanconf"))
@@ -244,24 +247,45 @@ class UDMClient:
     # ── VPN ───────────────────────────────────────────────────────────────────
 
     def vpn_status(self) -> Any:
-        clients = self.get(self._legacy("rest/vpnclient"))
-        servers = self.get(self._legacy("rest/vpnserver"))
-        tunnels = self.get(self._legacy("stat/vpn"))
-        return {"clients": clients, "servers": servers, "active_tunnels": tunnels}
+        # Network 10.x removed rest/vpnclient, rest/vpnserver and stat/vpn;
+        # the v2 VPN API replaces them.
+        return {
+            "connections": self.get(self._v2("vpn/connections")).get("connections", []),
+            "client_connections": self.get(self._v2("vpn/client-connections")).get("connections", []),
+            "users": self.get(self._v2("vpn/users")),
+        }
 
     # ── Events & Alarms ───────────────────────────────────────────────────────
+    # Network Application 10.x removed the legacy stat/event and stat/alarm
+    # endpoints. Events and critical alerts now live behind the v2 system-log
+    # API (POST-based, paginated, timestamps in epoch milliseconds).
 
     def events(self, hours: int = 24) -> Any:
-        return self.get(self._legacy(f"stat/event?within={hours * 3600}"))
+        cutoff = int(time.time() * 1000) - hours * 3600 * 1000
+        results: list = []
+        page = 0
+        while True:
+            resp = self._request("POST", self._v2("system-log/all"),
+                                 {"pageNumber": page, "pageSize": 100}, unwrap=False)
+            batch = resp.get("data", []) if isinstance(resp, dict) else []
+            if not batch:
+                break
+            results.extend(e for e in batch if e.get("timestamp", 0) >= cutoff)
+            if (batch[-1].get("timestamp", 0) < cutoff
+                    or page + 1 >= resp.get("total_page_count", 0)):
+                break
+            page += 1
+        return results
 
     def alarms(self) -> Any:
-        return self.get(self._legacy("stat/alarm"))
+        """Unread critical alerts — the Network 10.x successor to alarms."""
+        return self.post(self._v2("system-log/critical"), {})
 
     def alarms_archive_all(self) -> Any:
-        return self.post(self._legacy("cmd/evtmgr"), {"cmd": "archive-all-alarms"})
+        return self._request("PUT", self._v2("system-log/critical/mark-all-as-read"), {})
 
     def alarm_archive(self, alarm_id: str) -> Any:
-        return self.put(self._legacy(f"rest/alarm/{alarm_id}"), {"archived": True})
+        return self._request("PUT", self._v2(f"system-log/critical/{alarm_id}/mark-as-read"), {})
 
     # ── Stats / DPI ───────────────────────────────────────────────────────────
 
@@ -269,7 +293,11 @@ class UDMClient:
         return self.get(self._legacy("stat/dpi"))
 
     def stats_gateway(self) -> Any:
-        return self.get(self._legacy("stat/gateway"))
+        # Network 10.x removed stat/gateway; the WAN/www health subsystems carry
+        # the same information (WAN IP, throughput, speedtest, latency, uptime).
+        health = self.get(self._legacy("stat/health"))
+        return {s["subsystem"]: s for s in health
+                if s.get("subsystem") in ("wan", "www")}
 
     def stats_report(self, interval: str = "hourly", attrs: list[str] | None = None,
                      start: int | None = None, end: int | None = None) -> Any:

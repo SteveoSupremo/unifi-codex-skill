@@ -10,13 +10,20 @@ A [Claude Code](https://claude.ai/claude-code) skill for managing a UniFi Dream 
 
 ## Installation
 
-### 1. Copy the skill into place
+### 1. Put the skill into place
 
 ```bash
 cp -r . ~/.claude/skills/unifi
 ```
 
 Claude Code picks up skills from `~/.claude/skills/` automatically.
+
+Alternatively, symlink instead of copying — the installed skill then stays in sync
+with the repo and the script resolves `.env` from the repo root:
+
+```bash
+ln -s "$PWD" ~/.claude/skills/unifi
+```
 
 ### 2. Generate a UniFi API key
 

@@ -110,17 +110,28 @@ python udm.py portforward delete  <id>
 
 ### VPN
 ```bash
-python udm.py vpn                           # VPN clients, servers, active tunnels
+python udm.py vpn                           # Site-to-site connections, client tunnels, VPN users
 ```
+Network 10.x note: this now uses the v2 VPN API (`vpn/connections`,
+`vpn/client-connections`, `vpn/users`) — the legacy `rest/vpnclient`/`rest/vpnserver`
+endpoints were removed.
 
 ### Events & alarms
 ```bash
 python udm.py events                        # Last 24 hours
 python udm.py events --hours 48             # Custom window
-python udm.py alarms                        # Unresolved alarms
-python udm.py alarms archive-all            # Clear all alarms
-python udm.py alarms archive <id>           # Archive a specific alarm
+python udm.py alarms                        # Unread critical alerts
+python udm.py alarms archive-all            # Mark all critical alerts as read
+python udm.py alarms archive <id>           # Mark a specific alert as read
 ```
+**Network 10.x note:** the legacy `stat/event` / `stat/alarm` endpoints were removed in
+Network Application 10.x. These commands now use the v2 system-log API
+(`POST /proxy/network/v2/api/site/default/system-log/all` and `.../system-log/critical`).
+Semantics changed slightly: `alarms` lists *unread critical alerts* (the old alarm
+collection no longer exists), and archiving means "mark as read".
+Key event fields: `timestamp` (epoch ms), `category`, `subcategory`, `event`,
+`severity`, `message_raw` (template), `parameters` (values for the template),
+`status`, `target`.
 
 ### Routing & DNS
 ```bash
@@ -197,6 +208,11 @@ Look for `health[].subsystem` + `health[].status` for WAN/LAN/WLAN/VPN.
 ## Tips
 
 - `_id` fields from GET responses are required for PUT/DELETE on legacy REST endpoints.
+- Network Application 10.x removed a number of legacy endpoints (`stat/event`,
+  `stat/alarm`, `stat/admin`, `stat/gateway`, `rest/vpnclient`, `rest/vpnserver` among
+  them — they return 404 `api.err.NotFound` or 400 `api.err.InvalidObject`). Events and
+  critical alerts are only available via the v2 system-log API (see Events & alarms);
+  VPN info via the v2 VPN API (see VPN); `stats gateway` is derived from `stat/health`.
 - For firewall and traffic rule updates, always fetch the full object first, modify in memory,
   then PUT the whole thing back. Partial updates often fail or silently corrupt config.
 - The two firewall systems (legacy `firewallrule` vs v2 `trafficrules`) are independent —
