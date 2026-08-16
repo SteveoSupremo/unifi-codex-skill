@@ -1,0 +1,18 @@
+version: 1
+topology:
+  gateway: {name: UDM Pro, managed_by: unifi}
+  downstream_switch: {name: HP ProCurve 2810-24G, managed_by: external, link: vlan_trunk}
+networks:
+  - {vlan: 1, name: Default, subnet: 192.168.1.0/24, protected: true}
+  - {vlan: 2, name: Family, subnet: 192.168.2.0/24, protected: false}
+  - {vlan: 3, name: IoT, subnet: 192.168.3.0/24, protected: false}
+  - {vlan: 4, name: Servers, subnet: 192.168.6.0/24, protected: true}
+  - {vlan: 5, name: Media, subnet: 192.168.7.0/24, protected: false}
+  - {vlan: 99, name: Guest, subnet: 192.168.99.0/24, protected: false}
+policy_intent:
+  inter_vlan_firewall: TBD
+  family_to_servers: TBD
+  iot_required_services: TBD
+  guest_exceptions: TBD
+  management_admin_sources: TBD
+verification_targets: []

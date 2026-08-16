@@ -1,0 +1,6 @@
+interface:
+  display_name: "UniFi Network Administration"
+  short_description: "Safely audit and administer UniFi networks"
+  default_prompt: "Use $unifi to run a read-only health and exposure audit of my UniFi network."
+policy:
+  allow_implicit_invocation: true

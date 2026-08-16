@@ -1,0 +1,17 @@
+default_unknown_is_protected: true
+resources:
+  - UDM Pro
+  - WAN configuration
+  - Default VLAN
+  - management access
+  - DNS
+  - DHCP
+  - UDM-to-ProCurve trunk
+  - Servers network (192.168.6.0/24)
+  - Proxmox infrastructure
+  - Nginx Proxy Manager
+  - AdGuard and DNS infrastructure
+  - Home Assistant
+  - VPN administration
+  - Established/Related firewall behavior
+  - UniFi management rules

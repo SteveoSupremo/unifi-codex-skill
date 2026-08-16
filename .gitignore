@@ -1,5 +1,12 @@
-CLAUDE.md
-AGENTS.md
 .env
+.env.*
+!.env.example
 __pycache__/
-.claude/
+.pytest_cache/
+*.py[cod]
+reports/*
+!reports/.gitkeep
+snapshots/*
+!snapshots/.gitkeep
+inventory/*
+.coverage
