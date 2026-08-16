@@ -1,97 +1,82 @@
-# UniFi Claude Code Skill
+# UniFi Codex Skill
 
-A [Claude Code](https://claude.ai/claude-code) skill for managing a UniFi Dream Machine Pro (or any UniFi OS controller) via its local API. Once installed, Claude can query clients, manage firewall rules, toggle port forwards, inspect devices, and more — just by asking.
+A read-only-first OpenAI Codex Agent Skill for inventorying, auditing, troubleshooting, and carefully planning changes to a UniFi home network. It derives from the MIT-licensed [`dlewis7444/unifi-claude-skill`](https://github.com/dlewis7444/unifi-claude-skill); `scripts/udm.py` remains the upstream low-level client.
 
-## Requirements
+## Safety model
 
-- Python 3.10+
-- A UniFi OS controller with API key support (UDM Pro, UDM SE, CloudGateway, etc.)
-- [Claude Code](https://claude.ai/claude-code) with superpowers skills support
+Live writes are disabled by default. Level 0 reads are permitted after credential checks; operational actions require an exact request; configuration and critical-infrastructure changes require current-state discovery, snapshot, full diff, validation, explicit approval, one logical mutation, refetch, network verification, and a report. This bootstrap does not authorize writes.
 
-## Installation
+## Requirements and installation
 
-### 1. Put the skill into place
+Python 3.10+ is sufficient; runtime code uses the standard library. Develop from this checkout and install with a symlink:
 
 ```bash
-cp -r . ~/.claude/skills/unifi
+mkdir -p ~/.agents/skills
+ln -s /absolute/path/unifi-codex-skill ~/.agents/skills/unifi
+python /path/to/skill-creator/scripts/quick_validate.py /absolute/path/unifi-codex-skill
 ```
 
-Claude Code picks up skills from `~/.claude/skills/` automatically.
+Invoke with `$unifi`, or ask Codex to audit UniFi/network health, exposure, firewall policy, Wi-Fi, performance, or drift.
 
-Alternatively, symlink instead of copying — the installed skill then stays in sync
-with the repo and the script resolves `.env` from the repo root:
+## API key and read-only first run
 
-```bash
-ln -s "$PWD" ~/.claude/skills/unifi
-```
-
-### 2. Generate a UniFi API key
-
-In the UniFi OS web UI:
-
-1. Go to **Settings → Admins & Users → API Keys**
-2. Click **Create API Key**
-3. Give it a name (e.g. `claude`) and copy the key
-
-### 3. Configure host and API key (`.env`)
-
-Copy the example file and fill in your values:
+Generate a local key in UniFi Network's Control Plane/Integrations settings (the exact UI varies by Network release), then:
 
 ```bash
 cp .env.example .env
+chmod 600 .env
 $EDITOR .env
+git check-ignore .env
+git status --short
+python -m unittest discover -s tests -v
+python scripts/inventory.py --plan
+python scripts/inventory.py --output inventory.json
+python scripts/audit.py all --input inventory.json --report
 ```
 
-`.env` is gitignored. The script auto-loads it at startup. Supported keys:
+The collector uses `X-API-Key`. Local controller certificates are often self-signed; upstream `udm.py` disables verification, a documented limitation. Never commit `.env`, inventories, reports, or snapshots.
 
-| Key             | Purpose                                                              |
-| --------------- | -------------------------------------------------------------------- |
-| `UDM_HOST`      | UniFi controller hostname or IP (default: `unifi.local`)             |
-| `UNIFI_API_KEY` | API key. Optional — falls back to `pass internal/unifi/api-key` if unset |
-
-Real environment variables always take precedence over the `.env` file, and a
-runtime `--host` flag wins over both:
+## Commands
 
 ```bash
-python udm.py --host 192.168.1.1 status
+python scripts/safety.py status
+python scripts/audit.py firewall --input inventory.json
+python scripts/audit.py exposure --input inventory.json
+python scripts/audit.py health --input inventory.json
+python scripts/audit.py performance --input inventory.json
+python scripts/verify_network.py --host unifi.local
+python scripts/snapshot.py --target controller --type firewall-rule --id ID --input object.json --reason "planned change"
+python scripts/rollback.py snapshots/.../object.json --current current.json --dry-run
 ```
 
-**API key alternatives.** Instead of `UNIFI_API_KEY` in `.env`, you can store it in
-[`pass`](https://www.passwordstore.org/) under `internal/unifi/api-key` (the script
-will fetch it automatically), or export `UNIFI_API_KEY` in your shell profile.
+Rollback v1 is deliberately plan-only. Mutation utilities must support dry-run and the repository's approval gate before live-write support is added.
 
-## Usage
+## Architecture and API limitations
 
-Once installed, just talk to Claude:
+Official local Integration API endpoints are preferred. The official API expands across sites, devices, clients, networks, Wi-Fi, firewall policies/zones, ACLs, DNS policies, traffic matching lists, VPN/WAN and switching, but exact local coverage is controller-version-specific. Legacy statistics, port forwards, older firewall objects, DPI, events, routes, and some VPN information may require undocumented/private endpoints used by upstream `udm.py`; treat them as version-sensitive.
 
-- "Who's connected to the network?"
-- "Block the device with MAC aa:bb:cc:dd:ee:ff"
-- "Show me all firewall rules"
-- "Add a port forward — external 8080 to 192.168.1.50:80"
-- "What's my WAN traffic for the last 24 hours?"
-- "Restart the AP in the garage"
+The HP ProCurve 2810-24G is outside UniFi control. The skill must not claim it can modify or fully inventory those physical ports.
 
-Claude will invoke the skill automatically when your request involves the network.
+## Git and upstream workflow
 
-You can also run the helper script directly:
+Expected remotes are `origin` (your `unifi-codex-skill` repository) and `upstream` (the source project). After creating/forking the GitHub repository:
 
 ```bash
-python ~/.claude/skills/unifi/scripts/udm.py status
-python ~/.claude/skills/unifi/scripts/udm.py clients
-python ~/.claude/skills/unifi/scripts/udm.py --help
+git remote set-url origin git@github.com:YOUR_USER/unifi-codex-skill.git
+git fetch upstream
+git log HEAD..upstream/master
+git diff HEAD...upstream/master -- scripts/udm.py
 ```
 
-## Structure
+Use the actual default branch reported by GitHub. Do not force-push. See `references/upstream-notes.md` for adopted concepts and scope decisions.
 
-```
-SKILL.md          # Skill definition read by Claude Code
-scripts/
-  udm.py          # Python CLI helper for the UniFi API
-.env.example      # Template — copy to `.env` and fill in
-LICENSE
-README.md
-```
+## Troubleshooting
 
-## License
+- `401/403`: verify the local Integration API key and its permissions without printing it.
+- TLS errors: install/trust the controller certificate where possible; never disable verification silently.
+- `404`: confirm Network version and endpoint family in the controller's local API docs.
+- Empty data: verify site discovery; do not assume the site is named `default`.
 
-MIT — see [LICENSE](LICENSE).
+## License and attribution
+
+MIT; see `LICENSE`. Original work copyright remains with its authors. Architectural ideas from `sirkirby/unifi-mcp` and `enuno/unifi-mcp-server` are acknowledged; their code was not copied into this implementation.
