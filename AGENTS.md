@@ -8,6 +8,6 @@ This repository is a Codex skill for a real home gateway and firewall. Reliabili
 - Maintain the four permission levels and the discover/snapshot/diff/approve/apply/verify/report sequence documented in `references/mutation-safety.md`.
 - Use full-object GET/deep-copy/PUT semantics when an API requires replacement. Never synthesize missing fields.
 - Treat protected resources and unknown objects as Level 3. Never claim control of the HP ProCurve.
-- All automated tests must mock transport and must not contact a controller. Run `python -m unittest discover -s tests -v` before commits.
+- All automated tests must mock transport and must not contact a controller. Run `python3 -m unittest discover -s tests -v` before commits.
 - Keep commits focused; do not force-push, rewrite upstream history, or mix secrets/generated artifacts into source commits.
 - Update documentation and tests with behavior. Clearly mark official Integration API versus private/legacy, version-sensitive API behavior.

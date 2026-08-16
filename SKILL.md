@@ -9,7 +9,7 @@ Operate from this skill directory. Treat the controller as production infrastruc
 
 ## Absolute safety boundary
 
-- Default to Level 0/read-only. Run `python scripts/safety.py status` before controller work.
+- Default to Level 0/read-only. Run `python3 scripts/safety.py status` before controller work.
 - Never perform a live mutation unless the user explicitly requests the exact change and `UNIFI_ENABLE_WRITES=I_UNDERSTAND_THIS_CHANGES_MY_NETWORK` is set.
 - Never infer approval from an audit finding. Never use `udm.py raw` with POST, PUT, PATCH, or DELETE.
 - For Level 2/3 work, read `references/mutation-safety.md` and `references/protected-resources.yaml` first. Refuse ambiguous Level 3 requests.
@@ -20,8 +20,8 @@ Operate from this skill directory. Treat the controller as production infrastruc
 
 1. Confirm `.env` is ignored with `git check-ignore .env`; never display secrets.
 2. Run mocked tests before first live contact.
-3. Preview reads with `python scripts/inventory.py --plan`.
-4. Use `python scripts/inventory.py` for a sanitized inventory or `python scripts/audit.py <network|firewall|exposure|performance|wifi|health|all> [--report]`.
+3. Preview reads with `python3 scripts/inventory.py --plan`.
+4. Use `python3 scripts/inventory.py` for a sanitized inventory or `python3 scripts/audit.py <network|firewall|exposure|performance|wifi|health|all> [--report]`.
 5. Distinguish evidence as `measured`, `reported`, `inferred`, or `not_available`. Describe uncertain rules as “candidate for review,” never “unused.”
 
 ## Resources

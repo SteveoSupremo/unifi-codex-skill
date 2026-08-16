@@ -13,7 +13,7 @@ Python 3.10+ is sufficient; runtime code uses the standard library. Develop from
 ```bash
 mkdir -p ~/.agents/skills
 ln -s /absolute/path/unifi-codex-skill ~/.agents/skills/unifi
-python /path/to/skill-creator/scripts/quick_validate.py /absolute/path/unifi-codex-skill
+python3 /path/to/skill-creator/scripts/quick_validate.py /absolute/path/unifi-codex-skill
 ```
 
 Invoke with `$unifi`, or ask Codex to audit UniFi/network health, exposure, firewall policy, Wi-Fi, performance, or drift.
@@ -28,10 +28,10 @@ chmod 600 .env
 $EDITOR .env
 git check-ignore .env
 git status --short
-python -m unittest discover -s tests -v
-python scripts/inventory.py --plan
-python scripts/inventory.py --output inventory.json
-python scripts/audit.py all --input inventory.json --report
+python3 -m unittest discover -s tests -v
+python3 scripts/inventory.py --plan
+python3 scripts/inventory.py --output inventory.json
+python3 scripts/audit.py all --input inventory.json --report
 ```
 
 The collector uses `X-API-Key`. Local controller certificates are often self-signed; upstream `udm.py` disables verification, a documented limitation. Never commit `.env`, inventories, reports, or snapshots.
@@ -39,14 +39,14 @@ The collector uses `X-API-Key`. Local controller certificates are often self-sig
 ## Commands
 
 ```bash
-python scripts/safety.py status
-python scripts/audit.py firewall --input inventory.json
-python scripts/audit.py exposure --input inventory.json
-python scripts/audit.py health --input inventory.json
-python scripts/audit.py performance --input inventory.json
-python scripts/verify_network.py --host unifi.local
-python scripts/snapshot.py --target controller --type firewall-rule --id ID --input object.json --reason "planned change"
-python scripts/rollback.py snapshots/.../object.json --current current.json --dry-run
+python3 scripts/safety.py status
+python3 scripts/audit.py firewall --input inventory.json
+python3 scripts/audit.py exposure --input inventory.json
+python3 scripts/audit.py health --input inventory.json
+python3 scripts/audit.py performance --input inventory.json
+python3 scripts/verify_network.py --host unifi.local
+python3 scripts/snapshot.py --target controller --type firewall-rule --id ID --input object.json --reason "planned change"
+python3 scripts/rollback.py snapshots/.../object.json --current current.json --dry-run
 ```
 
 Rollback v1 is deliberately plan-only. Mutation utilities must support dry-run and the repository's approval gate before live-write support is added.
@@ -59,16 +59,25 @@ The HP ProCurve 2810-24G is outside UniFi control. The skill must not claim it c
 
 ## Git and upstream workflow
 
-Expected remotes are `origin` (your `unifi-codex-skill` repository) and `upstream` (the source project). After creating/forking the GitHub repository:
+This installation uses HTTPS for both remotes:
+
+```text
+origin   = https://github.com/SteveoSupremo/unifi-codex-skill.git
+upstream = https://github.com/dlewis7444/unifi-claude-skill.git
+```
+
+Configure or verify them with:
 
 ```bash
-git remote set-url origin git@github.com:YOUR_USER/unifi-codex-skill.git
+git remote set-url origin https://github.com/SteveoSupremo/unifi-codex-skill.git
+git remote set-url upstream https://github.com/dlewis7444/unifi-claude-skill.git
+git remote -v
 git fetch upstream
 git log HEAD..upstream/master
 git diff HEAD...upstream/master -- scripts/udm.py
 ```
 
-Use the actual default branch reported by GitHub. Do not force-push. See `references/upstream-notes.md` for adopted concepts and scope decisions.
+SSH URLs are an optional alternative when SSH authentication is configured; HTTPS is the current setup. Use the actual default branch reported by GitHub. Do not force-push. See `references/upstream-notes.md` for adopted concepts and scope decisions.
 
 ## Troubleshooting
 
