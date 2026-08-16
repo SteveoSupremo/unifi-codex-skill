@@ -9,4 +9,5 @@ reports/*
 snapshots/*
 !snapshots/.gitkeep
 inventory/*
+inventory*.json
 .coverage
