@@ -30,6 +30,11 @@ The auditor correlates objects but does not externally scan WAN reachability, pr
 a configured forward is reachable, inspect downstream reverse-proxy mappings, or modify
 the controller. Port numbers and object names are supporting evidence rather than proof.
 
+The expanded inventory plan must show application-version discovery, site discovery,
+every site-scoped GET, API family, purpose, and pagination behavior before live
+collection. Prefer official Integration v1. Mark unsupported optional datasets
+unavailable without terminating collection or exposing raw controller error bodies.
+
 ## Resources
 
 - Read `references/homelab-topology.md` for topology or port analysis.

@@ -21,7 +21,8 @@ def _normalized(value: Any) -> str:
 def firewall_findings(data: dict[str, Any]) -> list[Finding]:
     legacy_present = "firewall_rules" in data
     traffic_present = "traffic_rules" in data
-    rules = list(data.get("firewall_rules") or []) + list(data.get("traffic_rules") or [])
+    rules = (list(data.get("firewall_rules") or []) + list(data.get("traffic_rules") or [])
+        + list(data.get("firewall_policies") or []))
     findings: list[Finding] = []
     if not legacy_present and not traffic_present:
         return [Finding("informational", "Firewall coverage", "Firewall policy dataset unavailable",

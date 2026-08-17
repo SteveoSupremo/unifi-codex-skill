@@ -32,6 +32,14 @@ import ssl
 warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 
 
+class UDMReadError(RuntimeError):
+    """Sanitized transport error for optional read-only inventory requests."""
+
+    def __init__(self, status: int | None, reason: str):
+        super().__init__(reason)
+        self.status = status
+
+
 def _load_dotenv() -> None:
     """Load KEY=VALUE pairs from .env at the project root, if present.
 
@@ -91,7 +99,7 @@ class UDMClient:
         return f"{self.base}/proxy/network/integration/v1/{path}"
 
     def _request(self, method: str, url: str, body: dict | None = None,
-                 unwrap: bool = True) -> Any:
+                 unwrap: bool = True, fatal: bool = True) -> Any:
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(url, data=data, headers=self.headers, method=method)
         try:
@@ -105,12 +113,22 @@ class UDMClient:
                     return parsed["data"]
                 return parsed
         except urllib.error.HTTPError as e:
+            if not fatal:
+                raise UDMReadError(e.code, f"HTTP {e.code}") from e
             body_text = e.read().decode()
             print(f"HTTP {e.code}: {body_text}", file=sys.stderr)
             sys.exit(1)
+        except urllib.error.URLError as e:
+            if not fatal:
+                raise UDMReadError(None, "transport unavailable") from e
+            raise
 
     def get(self, url: str) -> Any:
         return self._request("GET", url)
+
+    def get_optional(self, url: str, *, unwrap: bool = True) -> Any:
+        """GET without terminating the process or printing controller error bodies."""
+        return self._request("GET", url, unwrap=unwrap, fatal=False)
 
     def post(self, url: str, body: dict) -> Any:
         return self._request("POST", url, body)

@@ -36,6 +36,14 @@ python3 scripts/audit.py all --input inventory.json --report
 
 The collector uses `X-API-Key`. Local controller certificates are often self-signed; upstream `udm.py` disables verification, a documented limitation. Never commit `.env`, inventories, reports, or snapshots.
 
+The inventory plan identifies the installed Network application version first, discovers
+the site, and lists every GET before collection. Official Integration v1 is preferred
+for connected clients, firewall zones/policies, Wi-Fi broadcasts, WAN interfaces, VPN
+servers, and site-to-site tunnels. Optional UPnP forwarding status and IDS/IPS settings
+are explicitly labeled as version-sensitive legacy GETs because the documented official
+catalog has no equivalent. Unsupported optional endpoints are recorded as unavailable
+without aborting collection; official collections are paginated using GET only.
+
 ## Commands
 
 ```bash

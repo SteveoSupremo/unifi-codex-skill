@@ -14,6 +14,7 @@ DATASETS = {
     "Sites": "site", "Networks": "networks", "Devices": "devices",
     "Legacy firewall": "firewall_rules", "Traffic rules": "traffic_rules",
     "Port forwards": "port_forwards", "Firewall zones": "firewall_zones",
+    "Firewall policies": "firewall_policies", "UPnP exposure": "upnp_exposure",
     "Clients": "clients", "Wi-Fi": "wlans", "WAN interfaces": "wan_interfaces",
     "VPN": "vpn", "IDS/IPS": "ids_ips",
 }
@@ -47,9 +48,20 @@ class AuditResult:
 
 def coverage(data: dict[str, Any]) -> dict[str, str]:
     result = {}
+    statuses = data.get("collection_status") or {}
     for label, key in DATASETS.items():
-        if key not in data:
+        if key == "vpn" and isinstance(data.get("vpn"), dict):
+            vpn_states = [statuses.get("vpn_servers", {}).get("status"), statuses.get("vpn_site_to_site", {}).get("status")]
+            if all(state == "unavailable" for state in vpn_states):
+                result[label] = "unavailable/not collected"
+            elif any(state == "partial" for state in vpn_states):
+                result[label] = "partially available"
+            else:
+                result[label] = "available"
+        elif statuses.get(key, {}).get("status") == "unavailable" or key not in data or data.get(key) is None:
             result[label] = "unavailable/not collected"
+        elif statuses.get(key, {}).get("status") == "partial":
+            result[label] = "partially available"
         elif isinstance(data[key], (list, dict)) and not data[key]:
             result[label] = "available (empty)"
         else:
