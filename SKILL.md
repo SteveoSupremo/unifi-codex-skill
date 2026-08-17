@@ -22,7 +22,13 @@ Operate from this skill directory. Treat the controller as production infrastruc
 2. Run mocked tests before first live contact.
 3. Preview reads with `python3 scripts/inventory.py --plan`.
 4. Use `python3 scripts/inventory.py` for a sanitized inventory or `python3 scripts/audit.py <network|firewall|exposure|performance|wifi|health|all> [--report]`.
-5. Distinguish evidence as `measured`, `reported`, `inferred`, or `not_available`. Describe uncertain rules as “candidate for review,” never “unused.”
+5. Prefer local analysis: `python3 scripts/audit.py exposure --input inventory.json`, `python3 scripts/audit.py firewall --input inventory.json`, or `python3 scripts/audit.py all --input inventory.json --report`.
+6. Use `--json` or `--json-output FILE` for machine-readable findings and correlated port-forward assessments.
+7. Distinguish evidence as `measured`, `reported`, `inferred`, `correlated`, or `not_available`. Describe uncertain rules as “candidate for review,” never “unused.”
+
+The auditor correlates objects but does not externally scan WAN reachability, prove that
+a configured forward is reachable, inspect downstream reverse-proxy mappings, or modify
+the controller. Port numbers and object names are supporting evidence rather than proof.
 
 ## Resources
 

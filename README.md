@@ -42,12 +42,27 @@ The collector uses `X-API-Key`. Local controller certificates are often self-sig
 python3 scripts/safety.py status
 python3 scripts/audit.py firewall --input inventory.json
 python3 scripts/audit.py exposure --input inventory.json
+python3 scripts/audit.py all --input inventory.json --report
+python3 scripts/audit.py exposure --input inventory.json --json
+python3 scripts/audit.py exposure --input inventory.json --json-output exposure.json
 python3 scripts/audit.py health --input inventory.json
 python3 scripts/audit.py performance --input inventory.json
 python3 scripts/verify_network.py --host unifi.local
 python3 scripts/snapshot.py --target controller --type firewall-rule --id ID --input object.json --reason "planned change"
 python3 scripts/rollback.py snapshots/.../object.json --current current.json --dry-run
 ```
+
+The Version 2 auditor correlates port forwards with collected device/client identity,
+network/VLAN membership, protected roles, documented topology, service-port hints, and
+related policy evidence. Port numbers and friendly names are supporting evidence, not
+proof. Reports include audit coverage and important unknowns, and classify recommended
+actions as `KEEP / VERIFY`, `REVIEW`, `HARDEN`, `CANDIDATE FOR REMOVAL`, or
+`UNKNOWN — INVESTIGATE`; passive evidence never produces an automatic removal.
+
+The auditor does not externally scan the WAN, inspect application authentication or
+TLS, prove that a configured forward is Internet-reachable, or modify the controller.
+Machine-readable JSON contains findings plus complete port-forward assessments and
+always reports `live_mutation: false`.
 
 Rollback v1 is deliberately plan-only. Mutation utilities must support dry-run and the repository's approval gate before live-write support is added.
 

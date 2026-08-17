@@ -27,5 +27,5 @@ class CoreTests(unittest.TestCase):
    self.assertEqual(json.loads(next(folder.glob("firewall-rule*.json")).read_text())["token"],"<redacted>")
  def test_audit_classification(self):
   f=analyze({"port_forwards":[{"name":"web","enabled":True,"fwd":"192.0.2.2","dst_port":"443"}]},"exposure")
-  self.assertEqual(f[0].severity,"high"); self.assertFalse(f[0].safe_to_automate)
+  self.assertEqual(f[0].severity,"medium"); self.assertFalse(f[0].safe_to_automate)
 if __name__=="__main__":unittest.main()

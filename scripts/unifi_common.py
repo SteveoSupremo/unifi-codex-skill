@@ -54,4 +54,6 @@ class Finding:
     severity: str; category: str; title: str; evidence: str; why: str
     confidence: str = "medium"; recommendation: str = "Review with a human."
     evidence_type: str = "reported"; safe_to_automate: bool = False
+    action_class: str = "REVIEW"
+    details: dict[str, Any] | None = None
     def as_dict(self) -> dict[str, Any]: return self.__dict__.copy()
