@@ -10,4 +10,5 @@ snapshots/*
 !snapshots/.gitkeep
 inventory/*
 inventory*.json
+/audit-expanded.json
 .coverage

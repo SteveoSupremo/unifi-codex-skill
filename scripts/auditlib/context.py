@@ -65,7 +65,7 @@ def network_for_ip(ip: str, networks: list[dict[str, Any]]) -> tuple[str, int | 
 
 def device_for_ip(ip: str, devices: list[dict[str, Any]]) -> dict[str, Any] | None:
     for device in devices:
-        candidates = {str(device.get(k)) for k in ("ip", "lan_ip", "adopt_ip") if device.get(k)}
+        candidates = {str(device.get(k)) for k in ("ip", "ipAddress", "lan_ip", "adopt_ip") if device.get(k)}
         if ip in candidates:
             return device
     return None

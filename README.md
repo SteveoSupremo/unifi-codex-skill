@@ -72,6 +72,12 @@ TLS, prove that a configured forward is Internet-reachable, or modify the contro
 Machine-readable JSON contains findings plus complete port-forward assessments and
 always reports `live_mutation: false`.
 
+When official firewall zones and policies are collected, reports also include an
+effective segmentation matrix, normalized policy findings, explicit port-forward policy
+correlation, VPN/management-access context, IDS/IPS configured posture, and reconciled
+UPnP/dynamic-forwarding evidence. Coverage distinguishes analyzed, partially analyzed,
+empty, unavailable, and unsupported datasets.
+
 Rollback v1 is deliberately plan-only. Mutation utilities must support dry-run and the repository's approval gate before live-write support is added.
 
 ## Architecture and API limitations

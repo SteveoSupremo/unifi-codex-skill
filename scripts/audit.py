@@ -31,6 +31,10 @@ def _executive_summary(result: AuditResult) -> str:
         "VPN": "VPN listener(s)", "Unknown": "unknown service(s)",
     }
     parts.extend(f"{count} {labels[k]}" for k, count in counts.items())
+    if result.normalized_firewall_policies:
+        parts.append(f"{len(result.normalized_firewall_policies)} official firewall policies analyzed")
+    known=sum(1 for row in result.segmentation if row.get("state")!="UNKNOWN")
+    if result.segmentation: parts.append(f"{known}/{len(result.segmentation)} requested segmentation relationships classified from explicit ordered policy evidence")
     return ". ".join(parts) + ". A configured forward does not prove external reachability. No changes were made."
 
 
@@ -43,6 +47,25 @@ def markdown(result_or_scope, findings=None) -> str:
     lines = [f"# UniFi {result.scope.title()} Audit", "",
         f"Generated: {dt.datetime.now(dt.timezone.utc).isoformat()}", "",
         "## Executive Summary", "", _executive_summary(result), ""]
+    lines += ["## Effective Segmentation Summary", ""]
+    if result.segmentation:
+        lines += ["| Relationship | Zones | State | Evidence |","| --- | --- | --- | --- |"]
+        for row in result.segmentation:
+            lines.append(f"| {row['relationship']} | {row['source_zone']} → {row['destination_zone']} | {row['state']} | {row['evidence']} |")
+    else: lines.append("Unable to determine effective segmentation from collected official policies.")
+    lines += ["", "## Firewall Policy Findings", ""]
+    if result.firewall_policy_findings:
+        for finding in result.firewall_policy_findings:
+            lines += [f"### {finding.title}","",f"- Severity: {finding.severity.title()}",f"- Evidence ({finding.evidence_type}): {finding.evidence}",f"- Why it matters: {finding.why}",f"- Recommendation: {finding.recommendation}",f"- Safe to automate: {'yes' if finding.safe_to_automate else 'no'}",""]
+    else: lines += ["No security-relevant official policy candidates were identified from normalized fields.",""]
+    lines += ["## VPN / Management Access","",result.vpn_posture.get("summary","VPN posture unavailable."),""]
+    for server in result.vpn_posture.get("servers",[]): lines.append(f"- {server['name']}: type={server['type']}, enabled={server['enabled']}")
+    if result.vpn_posture.get("caution"): lines += ["",result.vpn_posture["caution"],""]
+    lines += ["## IDS/IPS Posture","",result.ids_ips_posture.get("summary","IDS/IPS posture unavailable."),""]
+    if result.ids_ips_posture.get("material_settings"): lines.append("- Material settings: "+", ".join(f"{k}={v}" for k,v in result.ids_ips_posture["material_settings"].items()))
+    if result.ids_ips_posture.get("caution"): lines += ["",result.ids_ips_posture["caution"],""]
+    lines += ["## UPnP / Dynamic Exposure","",result.upnp_posture.get("summary","UPnP evidence unavailable."),""]
+    if result.upnp_posture.get("caution"): lines += [result.upnp_posture["caution"],""]
     if result.port_forwards:
         lines += ["## WAN Exposure Detail", "",
             "| Name | WAN | Proto | Destination | Role | Source Scope | Classification | Severity |",
@@ -51,8 +74,12 @@ def markdown(result_or_scope, findings=None) -> str:
             destination = f"{a.internal_ip}:{a.internal_port} ({a.network})"
             lines.append(f"| {a.name} | {a.wan_port} | {a.protocol} | {destination} | {a.destination_role} | {a.source_restriction} | {a.exposure_class} | {a.severity.title()} |")
         lines.append("")
+        lines.append("Policy correlation:")
+        lines.append("")
+        for a in result.port_forwards: lines.append(f"- {a.name}: {a.firewall_correlation}")
+        lines.append("")
     for severity in ("critical", "high", "medium", "low", "informational"):
-        group = [finding for finding in result.findings if finding.severity == severity]
+        group = [finding for finding in result.findings if finding.severity == severity and finding not in result.firewall_policy_findings]
         if group:
             lines += [f"## {severity.title()}", ""]
             for finding in group:

@@ -6,6 +6,7 @@ from typing import Any
 from unifi_common import Finding, ROOT
 from .context import device_for_ip, match_role, network_for_ip, reference_roles
 from .models import PortForwardAssessment
+from .firewall import normalize_policies, zone_networks
 
 
 PORT_SERVICES = {
@@ -47,7 +48,8 @@ def assess_port_forwards(data: dict[str, Any]) -> list[PortForwardAssessment]:
     devices = data.get("clients") or []
     devices = list(devices) + list(data.get("devices") or [])
     protected_roles = reference_roles(ROOT)
-    policy_count = len(data.get("firewall_rules") or []) + len(data.get("traffic_rules") or [])
+    official_policies = normalize_policies(data) if data.get("firewall_policies") else []
+    _, vlan_zones = zone_networks(data)
     assessments: list[PortForwardAssessment] = []
     for rule in data.get("port_forwards") or []:
         if not rule.get("enabled", True):
@@ -79,17 +81,28 @@ def assess_port_forwards(data: dict[str, Any]) -> list[PortForwardAssessment]:
             evidence.append(f"Port {port} is {service}; port number alone is not proof.")
         evidence.append(f"Source restriction is {source} ({source_evidence}).")
         confidence = "high" if device and role != "unknown" else "medium" if role != "unknown" or service != "unknown" else "low"
+        matching=[]
+        for policy in official_policies:
+            if not policy.enabled or policy.action != "ALLOW" or policy.source_zone != "External" or policy.destination_zone != vlan_zones.get(vlan):
+                continue
+            addresses={item["value"] for item in policy.destination_scope["addresses"]}
+            ports={item["value"] for item in policy.destination_scope["ports"]}
+            if ip in addresses and (port in ports or wan_port in ports): matching.append(policy)
+        if matching:
+            names=", ".join(p.name for p in matching)
+            restricted=any(p.source_scope["type"] != "ANY" for p in matching)
+            correlation=f"Associated official External → {vlan_zones.get(vlan)} allow policy identified: {names}. Additional source filtering is {'visible' if restricted else 'not visible in the policy source scope'}; NAT/stateful semantics remain controller-defined."
+        elif official_policies:
+            correlation="Official firewall policies were analyzed, but no defensible destination-IP/port policy correlation was found; the NAT/firewall relationship is unknown."
+        else:
+            correlation="Official firewall policies were unavailable or empty; port-forward-generated or zone policy handling is unknown."
         a = PortForwardAssessment(
             name=str(rule.get("name") or "unnamed"), protocol=str(rule.get("proto") or "unknown"),
             wan_port=wan_port, internal_ip=ip, internal_port=port,
             destination_name=device_name, destination_role=role, network=network,
             source_restriction=source, likely_service=service, exposure_class=exposure_class,
             evidence=evidence, confidence=confidence, protected_resource=protected,
-            firewall_correlation=(
-                "No explicit NAT-to-policy relationship was proven from collected firewall/traffic-rule objects."
-                if policy_count else
-                "Collected firewall and traffic-rule datasets are empty; port-forward-generated or zone policy handling is unknown."
-            ),
+            firewall_correlation=correlation,
         )
         a.evidence.append(a.firewall_correlation)
         a.severity, a.action_class = _severity(a)

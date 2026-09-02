@@ -22,3 +22,15 @@ direction/zone, enablement, and network identifiers. Duplicate and shadowed rule
 reported only when semantics and ordering provide sufficient evidence; otherwise they
 remain candidates for review. Empty or missing rule families produce an explicit
 coverage limitation, not a claim that segmentation permits or blocks traffic.
+
+Network 10.5.67 official firewall policies are normalized from `source.zoneId`,
+`destination.zoneId`, `action.type`, `action.allowReturnTraffic`, nested
+`trafficFilter` blocks (`networkFilter`, `ipAddressFilter`, `portFilter`,
+`macAddressFilter`, and `applicationFilter`), `ipProtocolScope`,
+`connectionStateFilter`, `index`, `loggingEnabled`, and `metadata.origin`.
+Zone `networkIds` correlate to collected network `external_id` values.
+
+Effective segmentation is `ALLOWED` or `BLOCKED` only when ordered, applicable policy
+evidence contains a conclusive broad action. Scoped exceptions before a conclusive
+default produce `LIMITED`; absent or unresolved evidence produces `UNKNOWN`. A missing
+allow never proves a block.

@@ -110,8 +110,8 @@ class FirewallTests(unittest.TestCase):
 class OutputTests(unittest.TestCase):
     def test_coverage_reporting(self):
         result=analyze_inventory(inventory(),"all")
-        self.assertEqual(result.coverage["Networks"],"available")
-        self.assertEqual(result.coverage["Clients"],"unavailable/not collected")
+        self.assertEqual(result.coverage["Networks"],"collected and analyzed")
+        self.assertEqual(result.coverage["Clients"],"unavailable")
         self.assertIn("## Audit Coverage",markdown(result))
 
     def test_secret_redaction_and_json_output(self):
@@ -123,6 +123,79 @@ class OutputTests(unittest.TestCase):
         self.assertFalse(parsed["live_mutation"])
         self.assertNotIn("bad",run.stdout)
         self.assertIn("port_forward_assessments",parsed)
+
+
+def official_inventory():
+    data=inventory()
+    for n,external in zip(data["networks"],["net-default","net-iot","net-servers","net-guest"]): n["external_id"]=external
+    data["firewall_zones"]=[
+        {"id":"z-internal","name":"Internal","networkIds":["net-default"]},
+        {"id":"z-iot","name":"IOT Zone","networkIds":["net-iot"]},
+        {"id":"z-servers","name":"Servers Zone","networkIds":["net-servers"]},
+        {"id":"z-hotspot","name":"Hotspot","networkIds":["net-guest"]},
+        {"id":"z-external","name":"External","networkIds":[]},
+        {"id":"z-gateway","name":"Gateway","networkIds":[]},
+    ]
+    data["firewall_policies"]=[]
+    data["clients"]=[];data["wlans"]=[];data["wan_interfaces"]=[]
+    data["vpn"]={"servers":[{"name":"Remote VPN","type":"WIREGUARD","enabled":True}],"site_to_site":[]}
+    data["ids_ips"]=[{"ips_mode":"ips","advanced_filtering_preference":"manual","honeypot_enabled":False}]
+    data["upnp_exposure"]=[]
+    return data
+
+
+def official_policy(name,source,destination,action,index=10000,src_filter=None,dst_filter=None,protocol=None,states=None,enabled=True,origin="USER_DEFINED"):
+    return {"id":"policy-"+name,"name":name,"enabled":enabled,"index":index,
+        "action":{"type":action,"allowReturnTraffic":False},
+        "source":{"zoneId":source,"trafficFilter":src_filter},
+        "destination":{"zoneId":destination,"trafficFilter":dst_filter},
+        "ipProtocolScope":{"ipVersion":"IPV4_AND_IPV6","protocolFilter":protocol},
+        "connectionStateFilter":states,"loggingEnabled":False,"metadata":{"origin":origin,"configurable":True}}
+
+
+class OfficialFirewallSchemaTests(unittest.TestCase):
+    def test_real_schema_is_normalized(self):
+        data=official_inventory();data["firewall_policies"]=[official_policy("Guest block","z-hotspot","z-servers","BLOCK",2147483647)]
+        result=analyze_inventory(data,"firewall");p=result.normalized_firewall_policies[0]
+        self.assertEqual(p["source_zone"],"Hotspot");self.assertEqual(p["destination_zone"],"Servers Zone")
+        self.assertEqual(p["action"],"BLOCK");self.assertEqual(p["ip_version"],"IPV4_AND_IPV6")
+
+    def test_effective_segmentation_uses_explicit_ordered_defaults(self):
+        data=official_inventory();data["firewall_policies"]=[
+            official_policy("Guest block","z-hotspot","z-servers","BLOCK",2147483647,origin="SYSTEM_DEFINED"),
+            official_policy("IoT block","z-iot","z-servers","BLOCK",2147483647,origin="SYSTEM_DEFINED"),
+            official_policy("Trusted allow","z-internal","z-servers","ALLOW",10000),]
+        rows=analyze_inventory(data,"firewall").segmentation
+        states={r["relationship"]:r["state"] for r in rows}
+        self.assertEqual(next(v for k,v in states.items() if k.startswith("Guest") and "Servers" in k),"BLOCKED")
+        self.assertEqual(next(v for k,v in states.items() if k.startswith("IoT") and "Servers" in k),"BLOCKED")
+        self.assertEqual(next(v for k,v in states.items() if k.startswith("Default") and "Servers" in k),"ALLOWED")
+        self.assertTrue(any(v=="UNKNOWN" for v in states.values()))
+
+    def test_scoped_allow_before_block_is_limited(self):
+        data=official_inventory();port_filter={"type":"PORT","portFilter":{"type":"SPECIFIC","items":[{"type":"PORT_NUMBER","value":53}],"matchOpposite":False}}
+        data["firewall_policies"]=[official_policy("DNS","z-hotspot","z-internal","ALLOW",100, dst_filter=port_filter),official_policy("default block","z-hotspot","z-internal","BLOCK",999)]
+        row=next(r for r in analyze_inventory(data,"firewall").segmentation if r["relationship"].startswith("Guest") and "Default" in r["relationship"])
+        self.assertEqual(row["state"],"LIMITED")
+
+    def test_broad_server_allow_candidate(self):
+        data=official_inventory();data["firewall_policies"]=[official_policy("Connect","z-internal","z-servers","ALLOW")]
+        self.assertTrue(any("Broad access into Servers" in f.title for f in analyze_inventory(data,"firewall").firewall_policy_findings))
+
+    def test_port_forward_correlates_exact_official_policy(self):
+        data=official_inventory();data["port_forwards"]=[forward("Admin",8006,"192.168.6.10",src_limiting_enabled=False)]
+        dst={"type":"IP_ADDRESS","ipAddressFilter":{"type":"SPECIFIC","items":[{"type":"IP_ADDRESS","value":"192.168.6.10"}],"matchOpposite":False},"portFilter":{"type":"SPECIFIC","items":[{"type":"PORT_NUMBER","value":8006}],"matchOpposite":False}}
+        data["firewall_policies"]=[official_policy("Allow Port Forward Admin","z-external","z-servers","ALLOW",30000,dst_filter=dst,origin="SYSTEM_DEFINED")]
+        correlation=analyze_inventory(data,"all").port_forwards[0].firewall_correlation
+        self.assertIn("Associated official",correlation);self.assertIn("source filtering is not visible",correlation)
+
+    def test_posture_sections_and_machine_output(self):
+        data=official_inventory();result=analyze_inventory(data,"all");text=markdown(result)
+        for heading in ("## Effective Segmentation Summary","## Firewall Policy Findings","## VPN / Management Access","## IDS/IPS Posture","## UPnP / Dynamic Exposure"):
+            self.assertIn(heading,text)
+        machine=result.as_dict();self.assertEqual(machine["vpn_management_access"]["remote_management_path"],"plausible")
+        self.assertEqual(machine["ids_ips_posture"]["mode"],"ips")
+        self.assertEqual(machine["upnp_dynamic_exposure"]["status"],"collected, empty")
 
 
 if __name__ == "__main__": unittest.main()
