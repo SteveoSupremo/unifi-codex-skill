@@ -8,6 +8,8 @@ reports/*
 !reports/.gitkeep
 snapshots/*
 !snapshots/.gitkeep
+operations/*
+!operations/.gitkeep
 inventory/*
 inventory*.json
 /audit-expanded.json

@@ -1,4 +1,4 @@
-import json, os, sys, tempfile, unittest
+import json, os, subprocess, sys, tempfile, unittest
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).parents[1]/"scripts"))
 from unifi_common import deep_modified, json_diff, load_env, redact, require_write_authorization
@@ -25,6 +25,14 @@ class CoreTests(unittest.TestCase):
   with tempfile.TemporaryDirectory() as d:
    folder=create_snapshot("controller","firewall-rule","123",{"name":"x","token":"bad"},"test",base=Path(d))
    self.assertEqual(json.loads(next(folder.glob("firewall-rule*.json")).read_text())["token"],"<redacted>")
+ def test_low_level_cli_refuses_raw_write_before_credentials(self):
+  commands=[["raw","POST","/unsafe"],["portforward","delete","unsafe-id"],
+            ["firewall","delete","unsafe-id"]]
+  for command in commands:
+   with self.subTest(command=command):
+    result=subprocess.run([sys.executable,str(Path(__file__).parents[1]/"scripts"/"udm.py"),*command],capture_output=True,text=True)
+    self.assertEqual(result.returncode,2)
+    self.assertIn("unguarded low-level writes are disabled",result.stderr)
  def test_audit_classification(self):
   f=analyze({"port_forwards":[{"name":"web","enabled":True,"fwd":"192.0.2.2","dst_port":"443"}]},"exposure")
   self.assertEqual(f[0].severity,"medium"); self.assertFalse(f[0].safe_to_automate)

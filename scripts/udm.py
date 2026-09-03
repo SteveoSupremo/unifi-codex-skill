@@ -139,6 +139,13 @@ class UDMClient:
     def delete(self, url: str) -> Any:
         return self._request("DELETE", url)
 
+    def guarded_write(self, method: str, url: str, body: dict | None = None) -> Any:
+        """Sanitized transport used only after the external mutation gate approves."""
+        method = method.upper()
+        if method not in {"POST", "PUT", "DELETE"}:
+            raise ValueError("guarded_write only accepts mutation methods")
+        return self._request(method, url, body, fatal=False)
+
     # ── Status / Health ──────────────────────────────────────────────────────
 
     def status(self) -> Any:
@@ -460,6 +467,19 @@ def main() -> None:
     p_raw.add_argument("--data", help="JSON body")
 
     args = parser.parse_args(argv)
+
+    # HomeLab safety boundary: retain upstream command parsing and client methods
+    # for useful diffs, but never expose an unguarded mutation through this CLI.
+    unguarded_write = (
+        (args.cmd in {"clients", "devices"} and bool(getattr(args, "action", None))) or
+        (args.cmd in {"networks", "wlans"} and getattr(args, "action", None) == "update") or
+        (args.cmd == "firewall" and getattr(args, "action", None) not in {"list", "groups"}) or
+        (args.cmd in {"trafficrules", "portforward"} and getattr(args, "action", None) != "list") or
+        (args.cmd == "alarms" and bool(getattr(args, "action", None))) or
+        (args.cmd == "raw" and str(getattr(args, "method", "GET")).upper() != "GET")
+    )
+    if unguarded_write:
+        parser.error("unguarded low-level writes are disabled; use scripts/mutate.py with --plan and an exact approval token")
 
     api_key = get_api_key()
     client = UDMClient(override_host, api_key)

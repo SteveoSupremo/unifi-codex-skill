@@ -14,3 +14,10 @@ sites, clients, Wi-Fi broadcasts, firewall zones/policies, WAN interfaces, VPN s
 and site-to-site VPN tunnels. Controller-local Network > Integrations documentation is
 still authoritative for 10.5.67. No documented official UPnP or IDS/IPS settings
 collection was found, so optional legacy GETs are labeled and degrade to unavailable.
+
+The guarded mutation layer is intentionally outside `udm.py`. The upstream CLI's
+write and non-GET raw branches are refused in this fork, while a small sanitized
+`guarded_write` transport remains available to `mutationlib.py` after its central gate.
+Port-forward and configured-client writes remain legacy/private and version-sensitive.
+Firewall-policy mutation paths use official Integration v1, but the controller-local
+Network > Integrations schema is authoritative for accepted bodies and methods.

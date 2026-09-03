@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
 
 from inventory import (
     APPLICATION_INFO_ENDPOINT, DISCOVERY_ENDPOINT, SITE_READS,
-    SiteDiscoveryError, build_plan, collect_inventory, select_site,
+    SiteDiscoveryError, build_plan, collect_inventory, discover_fixed_ip_state, select_site,
 )
 
 
@@ -36,6 +36,8 @@ class FakeClient:
             raise OptionalReadError()
         if url == APPLICATION_INFO_ENDPOINT:
             return {"applicationVersion":"10.5.67"}
+        if url == DISCOVERY_ENDPOINT:
+            return self.sites
         if "offset=" in url:
             return {"offset":0,"limit":200,"count":1,"totalCount":1,"data":[{"id":"synthetic"}]}
         return [{"id":"synthetic"}]
@@ -109,6 +111,7 @@ class InventorySiteTests(unittest.TestCase):
             def get_optional(self,url,*,unwrap=True):
                 self.calls.append(("GET",url,self.site))
                 if url==APPLICATION_INFO_ENDPOINT:return {"applicationVersion":"10.5.67"}
+                if url==DISCOVERY_ENDPOINT:return self.sites
                 if "/clients" in url:
                     offset=200 if "offset=200" in url else 0
                     return {"offset":offset,"limit":200,"count":1,"totalCount":201,"data":[{"offset":offset}]}
@@ -118,6 +121,22 @@ class InventorySiteTests(unittest.TestCase):
         result=collect_inventory(client)
         self.assertEqual(len(result["clients"]),2)
         self.assertTrue(any("/clients" in call[1] and "offset=200" in call[1] for call in client.calls))
+
+    def test_fixed_ip_discovery_uses_authoritative_config_and_network_override(self):
+        configured=[{"_id":"apple","name":"Apple TV","mac":"50:32:37:b2:f2:9a",
+                     "use_fixedip":True,"fixed_ip":"192.168.7.60",
+                     "last_connection_network_id":"old-network",
+                     "virtual_network_override_enabled":True,"virtual_network_override_id":"media"}]
+        observed=[{"macAddress":"50:32:37:b2:f2:9a","ipAddress":"192.168.7.59"}]
+        networks=[{"_id":"media","name":"Media","vlan":5}]
+        state=discover_fixed_ip_state(configured,observed,networks,"50:32:37:B2:F2:9A")
+        self.assertTrue(state["fixed_ip_enabled"])
+        self.assertEqual(state["fixed_ipv4"],"192.168.7.60")
+        self.assertEqual(state["leased_ipv4"],"192.168.7.59")
+        self.assertEqual(state["vlan_id"],5)
+        self.assertTrue(state["network_override"]["exposed"])
+        self.assertTrue(state["network_override"]["enabled"])
+        self.assertEqual(state["authoritative_fixed_ip_source"],"legacy/private rest/user")
 
 
 if __name__=="__main__": unittest.main()

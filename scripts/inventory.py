@@ -36,6 +36,8 @@ SITE_READS = [
     EndpointSpec("firewall_rules", "/proxy/network/api/s/{internal}/rest/firewallrule", "legacy/private", "legacy firewall rules"),
     EndpointSpec("traffic_rules", "/proxy/network/v2/api/site/{internal}/trafficrules", "private/v2", "traffic rules"),
     EndpointSpec("port_forwards", "/proxy/network/api/s/{internal}/rest/portforward", "legacy/private", "configured port forwards"),
+    EndpointSpec("client_configurations", "/proxy/network/api/s/{internal}/rest/user", "legacy/private", "authoritative configured-client and fixed-IP reservation state"),
+    EndpointSpec("legacy_clients", "/proxy/network/api/s/{internal}/stat/alluser", "legacy/private", "offline and historical client identity/network context"),
     EndpointSpec("clients", f"{INTEGRATION}/sites/{{site_id}}/clients{PAGE}", "official/integration-v1", "connected clients", True),
     EndpointSpec("firewall_zones", f"{INTEGRATION}/sites/{{site_id}}/firewall/zones{PAGE}", "official/integration-v1", "firewall zones", True),
     EndpointSpec("firewall_policies", f"{INTEGRATION}/sites/{{site_id}}/firewall/policies{PAGE}", "official/integration-v1", "zone firewall policies", True),
@@ -175,10 +177,83 @@ def _collect_spec(client: Any, selected: SelectedSite, spec: EndpointSpec) -> tu
     return records or [], status
 
 
+def _identifier(record: dict[str, Any] | None) -> str | None:
+    if not record:
+        return None
+    value = record.get("id") or record.get("_id")
+    return str(value) if value else None
+
+
+def _mac(record: dict[str, Any]) -> str:
+    return str(record.get("mac") or record.get("macAddress") or "").lower()
+
+
+def discover_fixed_ip_state(configured: list[dict[str, Any]] | None,
+                            observed: list[dict[str, Any]] | None,
+                            networks: list[dict[str, Any]] | None,
+                            mac: str) -> dict[str, Any]:
+    """Merge authoritative rest/user configuration with observational client data."""
+    normalized = mac.lower()
+    configuration = next((item for item in configured or [] if _mac(item) == normalized), None)
+    client = next((item for item in observed or [] if _mac(item) == normalized), None)
+    source = configuration or client or {}
+    override_enabled = source.get("virtual_network_override_enabled")
+    override = (source.get("virtual_network_override_id") or
+                source.get("network_override_id") or source.get("networkOverrideId") or
+                source.get("fixed_network_id") or source.get("fixedNetworkId"))
+    if override_enabled is False:
+        override = None
+    network_id = (override or source.get("network_id") or source.get("networkId") or
+                  source.get("last_connection_network_id") or source.get("lastConnectionNetworkId") or
+                  (client or {}).get("network_id") or (client or {}).get("networkId"))
+    network = next((item for item in networks or [] if _identifier(item) == str(network_id)), None)
+    if configuration is None:
+        fixed_enabled = None
+        fixed_address = None
+        authority = "not_available"
+    else:
+        fixed_enabled = bool(configuration.get("use_fixedip") is True or configuration.get("fixedIpEnabled") is True)
+        fixed_address = configuration.get("fixed_ip") or configuration.get("fixedIpAddress")
+        authority = "legacy/private rest/user"
+    return {
+        "client_identity": {"mac": normalized, "name": source.get("name") or source.get("hostname")},
+        "configured_client_id": _identifier(configuration),
+        "fixed_ip_enabled": fixed_enabled,
+        "fixed_ipv4": fixed_address if fixed_enabled else None,
+        "leased_ipv4": (client or {}).get("ip") or (client or {}).get("ipAddress"),
+        "network_id": str(network_id) if network_id else None,
+        "network_name": ((network or {}).get("name") or source.get("last_connection_network_name") or
+                         source.get("lastConnectionNetworkName")),
+        "vlan_id": (network or {}).get("vlan", (network or {}).get("vlan_id")),
+        "network_override": {"id": str(override) if override else None,
+                             "enabled": override_enabled if override_enabled is not None else (override is not None),
+                             "exposed": any(key in source for key in ("virtual_network_override_enabled",
+                                                                       "virtual_network_override_id",
+                                                                       "network_override_id", "networkOverrideId"))},
+        "authoritative_fixed_ip_source": authority,
+        "api_family": "legacy/private" if configuration is not None else "not_available",
+        "api_note": "rest/user is version-sensitive and supplies configuration; official connected clients remain observational",
+    }
+
+
+def fixed_ip_states(configured: list[dict[str, Any]] | None,
+                    observed_groups: list[list[dict[str, Any]] | None],
+                    networks: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for group in [configured, *observed_groups]:
+        for record in group or []:
+            if _mac(record):
+                merged.setdefault(_mac(record), record)
+    observed = [record for group in observed_groups for record in (group or [])]
+    return [discover_fixed_ip_state(configured, observed, networks, mac) for mac in sorted(merged)]
+
+
 def collect_inventory(client: Any, override: str | None = None) -> dict[str, Any]:
     """Perform only GET requests; unsupported optional datasets do not abort collection."""
     app_info = _get_optional(client, APPLICATION_INFO_ENDPOINT, unwrap=False)
-    sites = client.get(_url(client, DISCOVERY_ENDPOINT))
+    sites = _get_optional(client, DISCOVERY_ENDPOINT, unwrap=False)
+    if isinstance(sites, dict) and sites.get("_unavailable"):
+        raise SiteDiscoveryError("site discovery GET failed")
     selected = select_site(sites, override)
     client.site = selected.internal_reference
     result: dict[str, Any] = {"site": selected.as_dict(), "collection_status": {}, "live_mutation": False}
@@ -192,6 +267,15 @@ def collect_inventory(client: Any, override: str | None = None) -> dict[str, Any
         value, status = _collect_spec(client, selected, spec)
         result[spec.dataset] = value
         result["collection_status"][spec.dataset] = status
+    result["fixed_ip_states"] = fixed_ip_states(result.get("client_configurations"),
+                                                 [result.get("clients"), result.get("legacy_clients")],
+                                                 result.get("networks"))
+    result["collection_status"]["fixed_ip_states"] = {
+        "status": "available" if result.get("client_configurations") is not None else "unavailable",
+        "api_family": "derived from legacy/private configuration plus observational clients",
+        "method": "local correlation",
+        "endpoint": "/proxy/network/api/s/{site}/rest/user",
+    }
     result["status"] = {"health": result.pop("health"), "sysinfo": (result.pop("sysinfo") or [None])[0] if result.get("sysinfo") is not None else None}
     result["vpn"] = {"servers": result.pop("vpn_servers"), "site_to_site": result.pop("vpn_site_to_site")}
     return result
