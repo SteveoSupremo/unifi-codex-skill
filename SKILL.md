@@ -44,6 +44,7 @@ unavailable without terminating collection or exposing raw controller error bodi
 - Use `scripts/udm.py` only as the preserved low-level client. Prefer the guarded scripts for normal work.
 - Use `scripts/snapshot.py`, `scripts/rollback.py`, and `scripts/verify_network.py` for change planning and verification.
 - Use `scripts/mutate.py ... --plan` for guarded mutation plans. A later live invocation requires the exact emitted `--approve` token as well as write enablement; rollback is separately planned and approved.
+- Treat approval identity, authoritative preconditions, and runtime conflict checks separately. Tokens bind stable semantic mutation material; every apply still refetches relevant state and reruns conflicts immediately before its one write.
 - Never call `UDMClient.post`, `put`, `delete`, `guarded_write`, or another low-level mutation method directly. Supported writes must originate in `mutationlib.py` through `scripts/mutate.py`; ambiguous writes are reconciled by GET and never retried automatically.
 
 Never put credentials, raw sensitive inventory, reports, or snapshots into Git.

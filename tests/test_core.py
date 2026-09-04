@@ -1,5 +1,6 @@
 import json, os, subprocess, sys, tempfile, unittest
 from pathlib import Path
+from unittest import mock
 sys.path.insert(0,str(Path(__file__).parents[1]/"scripts"))
 from unifi_common import deep_modified, json_diff, load_env, redact, require_write_authorization
 from snapshot import create_snapshot
@@ -19,8 +20,9 @@ class CoreTests(unittest.TestCase):
   before={"id":"1","name":"old","untouched":{"x":1}}; after=deep_modified(before,{"name":"new"})
   self.assertEqual(after["untouched"],{"x":1}); self.assertEqual(before["name"],"old"); self.assertIn("+  \"name\": \"new\"",json_diff(before,after))
  def test_read_only_enforcement(self):
-  with self.assertRaises(PermissionError):require_write_authorization(explicit=True,approved=True,level=2,dry_run=False)
-  require_write_authorization(explicit=True,approved=True,level=2,dry_run=True)
+  with mock.patch.dict(os.environ,{"UNIFI_ENABLE_WRITES":"disabled"}):
+   with self.assertRaises(PermissionError):require_write_authorization(explicit=True,approved=True,level=2,dry_run=False)
+   require_write_authorization(explicit=True,approved=True,level=2,dry_run=True)
  def test_snapshot(self):
   with tempfile.TemporaryDirectory() as d:
    folder=create_snapshot("controller","firewall-rule","123",{"name":"x","token":"bad"},"test",base=Path(d))

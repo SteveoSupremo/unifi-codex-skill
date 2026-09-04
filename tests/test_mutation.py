@@ -133,6 +133,23 @@ class FakeMutationClient:
         return [self._copy(body)]
 
 
+class FixedIpFreshnessClient(FakeMutationClient):
+    """Inject a controller-state change only on the apply-time freshness GET."""
+
+    def __init__(self, change):
+        super().__init__()
+        self.change = change
+        self.user_collection_reads = 0
+
+    def get(self, endpoint):
+        clean = endpoint.split("?", 1)[0]
+        if clean.endswith("/rest/user"):
+            self.user_collection_reads += 1
+            if self.user_collection_reads == 3:
+                self.change(self)
+        return super().get(endpoint)
+
+
 class MutationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -264,6 +281,84 @@ class MutationTests(unittest.TestCase):
         self.assertEqual(result["plan"]["safety_level"], 3)
         self.assertTrue(any("inside_dynamic_pool" in step for step in result["plan"]["validation_steps"]))
         self.assertTrue(any("reservations may be inside or outside" in step for step in result["plan"]["validation_steps"]))
+
+    def test_fixed_ip_approval_token_is_stable_across_volatile_observations(self):
+        client = FakeMutationClient()
+        client.users[0].update({"_id": "65680d4534cd97156997b1c8",
+                                "network_id": "6952eb2ee570f33a50722ba7",
+                                "fixed_ip": "192.168.3.59"})
+        client.networks[0].update({"_id": "6952eb2ee570f33a50722ba7",
+                                   "id": "6952eb2ee570f33a50722ba7",
+                                   "name": "Media VLAN 5"})
+        client.active[0]["network_id"] = "6952eb2ee570f33a50722ba7"
+        first = self.mutator(client).fixed_ip_change(
+            "50:32:37:b2:f2:9a", "192.168.7.59", dry_run=True)["plan"]
+        client.users[0].update({"updatedAt": "later", "note": "changed but unrelated"})
+        client.users[1]["observation_timestamp"] = "later"
+        client.active[0].update({"last_seen": 999999, "lease_age": 42, "runtime_metric": 7})
+        client.networks[0]["generated_at"] = "later"
+        second = self.mutator(client).fixed_ip_change(
+            "50:32:37:b2:f2:9a", "192.168.7.59", dry_run=True)["plan"]
+        self.assertEqual(first["approval_token"], second["approval_token"])
+        self.assertTrue(first["approval_token"].startswith("SET-FIXED-IP-65680d45-"))
+        self.assertEqual(first["approval_fingerprint"], second["approval_fingerprint"])
+        self.assertNotEqual(first["precondition_fingerprint"], second["precondition_fingerprint"])
+        self.assertNotEqual(first["current_state_fingerprint"], second["current_state_fingerprint"])
+        self.assertEqual(first["approval_material"], second["approval_material"])
+        self.assertEqual(first["approval_material"]["before"]["fixed_ip"], "192.168.3.59")
+        self.assertEqual(first["approval_material"]["after"]["fixed_ip"], "192.168.7.59")
+        self.assertNotIn("active_clients", first["approval_material"])
+
+    def test_fixed_ip_approval_invalidation_fields(self):
+        base_client = FakeMutationClient()
+        base_client.users[0]["fixed_ip"] = "192.168.3.59"
+        base = self.mutator(base_client).fixed_ip_change(
+            "50:32:37:b2:f2:9a", "192.168.7.59", dry_run=True)["plan"]
+
+        cases = {}
+
+        changed_id = FakeMutationClient()
+        changed_id.users[0].update({"_id": "different-client", "fixed_ip": "192.168.3.59"})
+        cases["target client ID"] = self.mutator(changed_id).fixed_ip_change(
+            "50:32:37:b2:f2:9a", "192.168.7.59", dry_run=True)["plan"]
+
+        changed_mac = FakeMutationClient()
+        changed_mac.users[0].update({"mac": "50:32:37:b2:f2:9b", "fixed_ip": "192.168.3.59"})
+        changed_mac.active[0]["mac"] = "50:32:37:b2:f2:9b"
+        cases["target MAC"] = self.mutator(changed_mac).fixed_ip_change(
+            "50:32:37:b2:f2:9b", "192.168.7.59", dry_run=True)["plan"]
+
+        changed_network = FakeMutationClient()
+        changed_network.networks.append({"_id": "net-media-2", "id": "net-media-2", "name": "Media 2", "vlan": 6,
+                                         "ip_subnet": "192.168.7.1/24", "dhcpd_start": "192.168.7.20",
+                                         "dhcpd_stop": "192.168.7.200"})
+        changed_network.users[0].update({"network_id": "net-media-2", "fixed_ip": "192.168.3.59"})
+        cases["target network"] = self.mutator(changed_network).fixed_ip_change(
+            "50:32:37:b2:f2:9a", "192.168.7.59", dry_run=True)["plan"]
+
+        changed_enabled = FakeMutationClient()
+        changed_enabled.users[0].update({"use_fixedip": True, "fixed_ip": "192.168.3.59"})
+        cases["current use_fixedip"] = self.mutator(changed_enabled).fixed_ip_change(
+            "50:32:37:b2:f2:9a", "192.168.7.59", dry_run=True)["plan"]
+
+        changed_current_ip = FakeMutationClient()
+        changed_current_ip.users[0]["fixed_ip"] = "192.168.3.60"
+        cases["current fixed_ip"] = self.mutator(changed_current_ip).fixed_ip_change(
+            "50:32:37:b2:f2:9a", "192.168.7.59", dry_run=True)["plan"]
+
+        changed_desired_ip = FakeMutationClient()
+        changed_desired_ip.users[0]["fixed_ip"] = "192.168.3.59"
+        cases["desired fixed IP"] = self.mutator(changed_desired_ip).fixed_ip_change(
+            "50:32:37:b2:f2:9a", "192.168.7.60", dry_run=True)["plan"]
+
+        removed = FakeMutationClient()
+        removed.users[0].update({"use_fixedip": True, "fixed_ip": "192.168.7.59"})
+        cases["semantic diff"] = self.mutator(removed).fixed_ip_change(
+            "50:32:37:b2:f2:9a", None, dry_run=True)["plan"]
+
+        for label, plan in cases.items():
+            with self.subTest(field=label):
+                self.assertNotEqual(base["approval_token"], plan["approval_token"])
 
     def test_firewall_create_update_delete_dry_run(self):
         cases = [
@@ -407,6 +502,95 @@ class MutationTests(unittest.TestCase):
         client.active.append({"mac": "11:22:33:44:55:66", "ip": "192.168.7.70", "network_id": "net-media"})
         with self.assertRaisesRegex(ValidationError, "currently assigned"):
             self.mutator(client).fixed_ip_change("50:32:37:b2:f2:9a", "192.168.7.70", dry_run=True)
+
+    def _assert_fixed_ip_apply_time_refusal(self, change, message):
+        client = FixedIpFreshnessClient(change)
+        mutator = self.mutator(client, {"UNIFI_ENABLE_WRITES": WRITE_PHRASE})
+        token = mutator.fixed_ip_change(
+            "50:32:37:b2:f2:9a", "192.168.7.59", dry_run=True)["plan"]["approval_token"]
+        with self.assertRaisesRegex((ValidationError, StaleApprovalError), message):
+            mutator.fixed_ip_change(
+                "50:32:37:b2:f2:9a", "192.168.7.59", dry_run=False, approval=token)
+        self.assertFalse(any(call[0] == "PUT" for call in client.calls))
+
+    def test_fixed_ip_apply_refuses_new_reservation(self):
+        self._assert_fixed_ip_apply_time_refusal(
+            lambda client: client.users[1].update({"use_fixedip": True, "fixed_ip": "192.168.7.59"}),
+            "reservation")
+
+    def test_fixed_ip_apply_refuses_new_configured_owner(self):
+        self._assert_fixed_ip_apply_time_refusal(
+            lambda client: client.users[1].update({"use_fixedip": False, "fixed_ip": "192.168.7.59"}),
+            "configured client")
+
+    def test_fixed_ip_apply_refuses_new_active_lease_owner(self):
+        self._assert_fixed_ip_apply_time_refusal(
+            lambda client: client.active.append({"mac": "11:22:33:44:55:66", "ip": "192.168.7.59",
+                                                 "network_id": "net-media", "last_seen": 10}),
+            "currently assigned")
+
+    def test_fixed_ip_apply_refuses_changed_authoritative_state(self):
+        self._assert_fixed_ip_apply_time_refusal(
+            lambda client: client.users[0].update({"use_fixedip": True, "fixed_ip": "192.168.7.58"}),
+            "preconditions changed")
+
+    def test_fixed_ip_apply_refuses_concurrent_nonvolatile_put_source_change(self):
+        self._assert_fixed_ip_apply_time_refusal(
+            lambda client: client.users[0].update({"note": "changed concurrently"}),
+            "preconditions changed")
+
+    def test_fixed_ip_apply_allows_harmless_runtime_freshness_change(self):
+        def change(client):
+            client.active[0].update({"last_seen": 999999, "lease_age": 1,
+                                     "observation_timestamp": "later", "runtime_metric": 8})
+            client.users[0]["updatedAt"] = "later"
+
+        client = FixedIpFreshnessClient(change)
+        mutator = self.mutator(client, {"UNIFI_ENABLE_WRITES": WRITE_PHRASE})
+        token = mutator.fixed_ip_change(
+            "50:32:37:b2:f2:9a", "192.168.7.59", dry_run=True)["plan"]["approval_token"]
+        result = mutator.fixed_ip_change(
+            "50:32:37:b2:f2:9a", "192.168.7.59", dry_run=False, approval=token)
+        self.assertTrue(result["verification"]["verified"])
+        self.assertEqual(sum(call[0] == "PUT" for call in client.calls), 1)
+        put_body = next(call[2] for call in client.calls if call[0] == "PUT")
+        self.assertEqual(put_body["updatedAt"], "later")
+
+    def test_other_mutation_tokens_ignore_volatile_collection_metadata(self):
+        client = FakeMutationClient()
+        delete_first = self.mutator(client).port_forward_delete("pf-target", dry_run=True)["plan"]["approval_token"]
+        client.port_forwards[0]["updatedAt"] = "later"
+        client.policies[0]["observation_timestamp"] = "later"
+        client.forwarding_status[0]["last_seen"] = 999
+        delete_second = self.mutator(client).port_forward_delete("pf-target", dry_run=True)["plan"]["approval_token"]
+        self.assertEqual(delete_first, delete_second)
+
+        original = client.port_forwards.pop(0)
+        client.policies = [item for item in client.policies if item.get("portForwardId") != "pf-target"]
+        client.forwarding_status = [item for item in client.forwarding_status if item.get("portForwardId") != "pf-target"]
+        source = create_snapshot("unifi-network", "port-forward", "pf-target", original, "test deletion",
+                                 base=self.base / "stable-source", restorable=True,
+                                 controller_identity=TEST_IDENTITY)
+        restore_first = self.mutator(client).port_forward_restore(source, dry_run=True)["plan"]["approval_token"]
+        client.forwarding_status[0]["last_seen"] = 1000
+        client.zones.reverse()
+        restore_second = self.mutator(client).port_forward_restore(source, dry_run=True)["plan"]["approval_token"]
+        self.assertEqual(restore_first, restore_second)
+
+        firewall_cases = (
+            lambda mutator: mutator.firewall_policy_create(policy("input"), dry_run=True),
+            lambda mutator: mutator.firewall_policy_update("user-1", {"name": "Updated"}, dry_run=True),
+            lambda mutator: mutator.firewall_policy_delete("user-1", dry_run=True),
+        )
+        for operation in firewall_cases:
+            with self.subTest(operation=operation):
+                firewall_client = FakeMutationClient()
+                first = operation(self.mutator(firewall_client))["plan"]["approval_token"]
+                next(item for item in firewall_client.policies if item.get("id") == "user-1")["generatedAt"] = "later"
+                firewall_client.zones.reverse()
+                firewall_client.networks[0]["collected_at"] = "later"
+                second = operation(self.mutator(firewall_client))["plan"]["approval_token"]
+                self.assertEqual(first, second)
 
     def test_fixed_ip_target_network_change_before_write_is_refused(self):
         class MovingClient(FakeMutationClient):

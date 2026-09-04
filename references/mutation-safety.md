@@ -24,12 +24,22 @@ Every normal live mutation goes through `scripts/mutate.py` and the central gate
 5. The exact before/after diff is non-empty and validation succeeded.
 6. The plan contains exactly one logical mutation and holds the mutation lock.
 
-The approval fingerprint is deterministic and covers the controller host, site UUID,
-internal reference, site name, Network version, target object type and stable identity,
-normalized complete approved state, normalized proposed state, operation, and exact
-diff. The displayed token is a short derivative of that fingerprint. A changed field,
-diff, controller, site, or version produces a different token; static approvals such as
-`--approve yes` are invalid.
+The approval fingerprint is deterministic and identifies one semantic mutation. It
+covers controller/site/Network identity, target object type and stable identity,
+operation-specific authoritative BEFORE fields, requested AFTER fields, semantic diff,
+and safety level. It deliberately excludes snapshots and operation IDs, collection
+times, lease age/timestamps, connected-client freshness, runtime telemetry, unrelated
+client fields, and semantically irrelevant dictionary/list ordering. Repeating the same
+plan against the same mutation-relevant BEFORE state therefore emits the same token.
+A relevant BEFORE/AFTER field, semantic diff, controller, site, version, target, or
+safety level change produces a different token; static approvals such as `--approve
+yes` are invalid.
+
+Approval identity, preconditions, and runtime conflict checks are separate. Each plan
+records an approval fingerprint and a precondition fingerprint. The precondition
+fingerprint covers authoritative mutation-relevant BEFORE state. Runtime conflict
+checks use fresh controller observations but do not become approval identity merely
+because their telemetry timestamps or lease age changed.
 
 Environment enablement is necessary but is never authorization by itself. The
 low-level `udm.py` CLI refuses POST, PUT, and DELETE operations, including non-GET
@@ -44,10 +54,12 @@ and the final write. A changed current object produces a different token, invali
 the earlier approval.
 
 Immediately after authorization and immediately before the write, the engine refetches
-controller/site identity and the complete authoritative freshness bundle used by that
-operation. It compares normalized state with the approved bundle. Any change stops with
-"Approved state is stale" and requires a new plan and approval; it never regenerates a
-diff beneath an old approval.
+controller/site identity and the complete safety bundle used by that operation. It
+compares the operation-specific precondition material and reruns current conflict and
+validation checks. A mutation-relevant authoritative BEFORE change stops as stale and
+requires a new plan and approval. Volatile, non-conflicting runtime freshness alone
+does not invalidate approval. A fresh conflict always stops before the write. The
+engine never regenerates a semantic diff beneath an old approval.
 
 Every normal operation issues at most one authoritative POST, PUT, or DELETE. All
 requests after it are GET verification. Mutation transport calls have no automatic
@@ -87,10 +99,18 @@ the engine never tries to remove them. Restore compares semantics without IDs, r
 original and assigned IDs, and verifies regenerated policy/status semantics without
 expecting the prior generated-policy ID.
 
-Fixed-IP changes are Level 3. They preserve the full configured-client object, validate
-the client subnet, gateway/network/broadcast exclusions, existing reservations,
-active leases, and DHCP pool relationship, then PUT the complete minimally edited
-object. Creation of a missing configured-client object is unsupported.
+Fixed-IP changes are Level 3. Their approval material is an allowlist: operation,
+configured-client ID, MAC, target network ID/name/VLAN, current and requested
+`use_fixedip`/`fixed_ip`, semantic diff, controller/site identity, and safety level.
+The precondition fingerprint covers the complete nonvolatile configured-client PUT
+source plus the authoritative target ID, MAC, network, and current fixed-IP fields.
+This prevents a replacement PUT from overwriting an unrelated concurrent edit;
+fresh volatile server metadata is rebased into the PUT object. Immediately before PUT,
+the engine independently confirms the target still exists and remains on that network, then reruns subnet,
+gateway/network/broadcast, other configured-owner/reservation, active-lease, and DHCP
+pool checks. A lease for the desired IP is acceptable only when its MAC is the target.
+The full configured-client object is preserved and minimally edited. Creation of a
+missing configured-client object is unsupported.
 
 UniFi documents Fixed IP Address as a DHCP reservation and supports fixed addresses
 outside DHCP scope (with separate local-DNS guidance), so neither inside-pool nor
@@ -120,10 +140,11 @@ token.
 
 ## Output contract
 
-Plan JSON includes a concise `safety_block` with controller, site, Network version,
-operation, target, safety level, gate status, snapshot, current/proposed fingerprints,
-secondary effects, verification plan, rollback path, approval token, and the explicit
-notice `NO WRITE HAS OCCURRED.`
+Plan JSON includes the canonical `approval_material` plus a concise `safety_block` with
+controller, site, Network version, operation, target, safety level, gate status,
+snapshot, current/proposed/precondition/approval fingerprints, secondary effects,
+verification plan, rollback path, approval token, and the explicit notice `NO WRITE
+HAS OCCURRED.`
 
 Execution JSON includes a `completion_block` with whether mutation was attempted,
 authoritative write count, ambiguity status, verification, unrelated-state result,

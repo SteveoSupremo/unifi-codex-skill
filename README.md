@@ -6,14 +6,16 @@ A read-only-first OpenAI Codex Agent Skill for inventorying, auditing, troublesh
 
 Live writes are disabled by default. Level 0 reads are permitted after credential checks; operational actions require an exact request; configuration and critical-infrastructure changes require current-state discovery, snapshot, full diff, validation, explicit approval, one logical mutation, refetch, network verification, and a report.
 
-`UNIFI_ENABLE_WRITES=I_UNDERSTAND_THIS_CHANGES_MY_NETWORK` is necessary for a live write but is **not authorization**. Every operation must first run with `--plan`; the plan emits an approval token bound to the operation, target, current state, and proposed state. A separate invocation must supply that exact token with `--approve`. If current state changes, the token changes. Rollback is another mutation and requires its own plan and approval. The low-level `udm.py` CLI refuses all writes and non-GET raw calls.
+`UNIFI_ENABLE_WRITES=I_UNDERSTAND_THIS_CHANGES_MY_NETWORK` is necessary for a live write but is **not authorization**. Every operation must first run with `--plan`; the plan emits a deterministic approval token bound to the semantic operation, target, mutation-relevant authoritative BEFORE state, requested AFTER state, diff, and safety level. A separate invocation must supply that exact token with `--approve`. Relevant state changes invalidate the plan; volatile lease/observation timestamps and unrelated runtime telemetry do not change an otherwise identical token. Rollback is another mutation and requires its own plan and approval. The low-level `udm.py` CLI refuses all writes and non-GET raw calls.
 
 Plans are additionally bound to the UDM host, site UUID/internal reference/name, and
-Network version. Immediately before its single authoritative write, the command
-refetches identity and complete approved state; any drift invalidates approval. Writes
-are never retried automatically after an ambiguous transport result. The framework
-instead performs read-only reconciliation and requires new approval if the outcome is
-not conclusive.
+Network version. Approval identity is separate from the authoritative precondition
+fingerprint and fresh runtime conflict checks. Immediately before its single
+authoritative write, the command refetches identity and operation-specific safety
+state. A relevant precondition change or fresh conflict stops the write, while harmless
+runtime freshness alone does not. Writes are never retried automatically after an
+ambiguous transport result. The framework instead performs read-only reconciliation
+and requires new approval if the outcome is not conclusive.
 
 ## Requirements and installation
 
@@ -104,7 +106,8 @@ export UNIFI_ENABLE_WRITES=I_UNDERSTAND_THIS_CHANGES_MY_NETWORK
 python3 scripts/mutate.py ... --approve APPROVE-...
 ```
 
-Plan output includes full approval/current/proposed fingerprints and ends with a
+Plan output includes canonical approval material and full
+approval/precondition/current/proposed fingerprints, and ends with a
 `safety_block` containing `NO WRITE HAS OCCURRED.` Actual execution emits a matching
 `completion_block`. Immutable rollback snapshots are mode 0600, checksummed, and bound
 to controller/site identity. Sanitized operation records are written under
@@ -122,7 +125,10 @@ is observational and does not authoritatively expose reservation configuration o
 tested Network generation. A fixed-IP change requires an existing configured-client
 object and uses full-object GET/deep-copy/PUT semantics. Address validation includes the
 associated subnet, gateway/network/broadcast exclusions, active leases, reservations,
-and DHCP pool relationship.
+other configured-client ownership, and DHCP pool relationship. Fixed-IP approval
+material retains only the client ID/MAC, target network ID/name/VLAN, current and
+requested fixed-IP fields, semantic diff, operation, safety level, and controller/site
+identity. Apply refetches the full bundle and reruns conflicts immediately before PUT.
 
 UniFi treats Fixed IP Address as a DHCP reservation. Both inside- and outside-pool
 addresses are handled without imposing a guessed exclusion rule; the relationship is

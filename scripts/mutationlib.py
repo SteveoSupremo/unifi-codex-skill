@@ -23,13 +23,19 @@ from unifi_common import ROOT, WRITE_PHRASE, json_diff, redact, writes_enabled
 
 
 INTEGRATION = "/proxy/network/integration/v1"
-VOLATILE_KEYS = {"createdAt", "updatedAt", "created_at", "updated_at", "timestamp"}
+VOLATILE_KEYS = {
+    "createdAt", "updatedAt", "created_at", "updated_at", "timestamp",
+    "observedAt", "observed_at", "observationTimestamp", "observation_timestamp",
+    "collectedAt", "collected_at", "generatedAt", "generated_at",
+    "leaseAge", "lease_age", "lastSeen", "last_seen",
+}
 IDENTITY_KEYS = {"id", "_id"}
 POLICY_ORIGINS_PROTECTED = {"SYSTEM_DEFINED", "DERIVED"}
 POLICY_ACTIONS = {"ALLOW", "BLOCK", "REJECT"}
 CONNECTION_STATES = {"NEW", "ESTABLISHED", "RELATED", "INVALID"}
 IP_VERSIONS = {"IPV4", "IPV6", "IPV4_AND_IPV6", "BOTH"}
 RESERVATION_SEMANTICS = "UniFi DHCP reservations may be inside or outside the dynamic pool"
+_UNSET = object()
 
 
 class MutationError(RuntimeError):
@@ -107,6 +113,7 @@ class MutationPlan:
     rollback_path: str
     current_state_fingerprint: str
     proposed_state_fingerprint: str
+    precondition_fingerprint: str
     approval_fingerprint: str
     approval_token: str
     mutation_method: str
@@ -117,9 +124,12 @@ class MutationPlan:
     validated: bool = True
     logical_mutations: int = 1
     approved_state: Any = field(default=None, repr=False)
+    precondition_state: Any = field(default=None, repr=False)
+    approval_material: Any = field(default=None, repr=False)
 
     def public(self) -> dict[str, Any]:
-        result = {key: value for key, value in asdict(self).items() if key != "approved_state"}
+        hidden = {"approved_state", "precondition_state"}
+        result = {key: value for key, value in asdict(self).items() if key not in hidden}
         result["current_state"] = redact(self.current_state)
         result["proposed_state"] = redact(self.proposed_state)
         result["safety_block"] = {
@@ -132,6 +142,7 @@ class MutationPlan:
             "Write gate": "disabled for plan; exact environment phrase plus matching token required for execution",
             "Snapshot": self.snapshot_path,
             "Current-state fingerprint": self.current_state_fingerprint,
+            "Precondition fingerprint": self.precondition_fingerprint,
             "Proposed-state fingerprint": self.proposed_state_fingerprint,
             "Expected secondary effects": self.expected_generated_effects,
             "Verification": self.validation_steps,
@@ -151,9 +162,7 @@ class MutationGate:
             raise PermissionError("live writes are disabled; the exact enablement phrase is required")
         if not approval:
             raise PermissionError("an explicit operation approval token is required")
-        fingerprint = approval_fingerprint(plan.controller_identity, plan.target_object_type,
-                                           plan.operation, plan.target_identity,
-                                           plan.approved_state, plan.proposed_state, plan.diff)
+        fingerprint = approval_fingerprint(plan.approval_material)
         expected_token = approval_token(plan.operation, plan.target_identity, fingerprint)
         if fingerprint != plan.approval_fingerprint or plan.approval_token != expected_token:
             raise PermissionError("plan fingerprint is internally inconsistent")
@@ -175,11 +184,9 @@ class MutationGate:
             raise PermissionError("exactly one logical mutation is allowed")
 
 
-def approval_fingerprint(identity: dict[str, str], object_type: str, operation: str,
-                         target: Any, approved_state: Any, proposed: Any, diff: str) -> str:
-    return state_fingerprint({"controller_site": identity, "target_object_type": object_type,
-                              "target_identity": target, "current_state": approved_state,
-                              "proposed_state": proposed, "operation": operation, "exact_diff": diff})
+def approval_fingerprint(material: Any) -> str:
+    """Hash canonical, operation-specific approval material only."""
+    return state_fingerprint(material)
 
 
 def approval_token(operation: str, target: Any, fingerprint: str) -> str:
@@ -232,6 +239,17 @@ def _strip_keys(value: Any, keys: set[str]) -> Any:
     if isinstance(value, list):
         return [_strip_keys(v, keys) for v in value]
     return value
+
+
+def _stable_collection(records: list[dict[str, Any]], *, ordered: bool = False) -> list[dict[str, Any]]:
+    """Remove known telemetry and canonicalize semantically unordered collections."""
+    stable = [_strip_keys(record, VOLATILE_KEYS) for record in records]
+    if ordered:
+        def order_key(item: dict[str, Any]) -> tuple[int, int | str, str]:
+            value = item.get("index", item.get("order", 0))
+            return (0, value, object_id(item)) if isinstance(value, int) else (1, str(value), object_id(item))
+        return sorted(stable, key=order_key)
+    return sorted(stable, key=lambda item: (object_id(item), state_fingerprint(item)))
 
 
 def _deep_merge(current: dict[str, Any], changes: dict[str, Any]) -> dict[str, Any]:
@@ -450,6 +468,22 @@ def _network_for_client(client: dict[str, Any], networks: list[dict[str, Any]]) 
     return next((network for network in networks if object_id(network) == str(network_id)), None)
 
 
+def _network_identity(network: dict[str, Any]) -> dict[str, Any]:
+    return {"id": object_id(network), "name": network.get("name"),
+            "vlan": network.get("vlan", network.get("vlan_id"))}
+
+
+def _fixed_ip_state(client: dict[str, Any], networks: list[dict[str, Any]]) -> dict[str, Any]:
+    network = _network_for_client(client, networks) or {}
+    return {
+        "target_id": object_id(client),
+        "mac": str(client.get("mac") or "").lower(),
+        "network": _network_identity(network),
+        "use_fixedip": client.get("use_fixedip") is True or client.get("fixedIpEnabled") is True,
+        "fixed_ip": client.get("fixed_ip") or client.get("fixedIpAddress"),
+    }
+
+
 def validate_fixed_ip(ip_text: str, client: dict[str, Any], configured: list[dict[str, Any]],
                       active: list[dict[str, Any]], networks: list[dict[str, Any]]) -> tuple[list[str], str]:
     try:
@@ -470,11 +504,15 @@ def validate_fixed_ip(ip_text: str, client: dict[str, Any], configured: list[dic
     if str(address) == gateway:
         raise ValidationError("fixed IP conflicts with the network gateway")
     mac = str(client.get("mac") or "").lower()
+    target_id = object_id(client)
     for other in configured:
-        if str(other.get("mac") or "").lower() == mac:
+        if object_id(other) == target_id:
             continue
-        if (other.get("use_fixedip") is True or other.get("fixedIpEnabled") is True) and str(other.get("fixed_ip") or other.get("fixedIpAddress") or "") == str(address):
-            raise ValidationError("fixed IP conflicts with another reservation")
+        other_ip = str(other.get("fixed_ip") or other.get("fixedIpAddress") or "")
+        if other_ip == str(address):
+            if other.get("use_fixedip") is True or other.get("fixedIpEnabled") is True:
+                raise ValidationError("fixed IP conflicts with another reservation")
+            raise ValidationError("fixed IP is claimed by another configured client")
     for other in active:
         if str(other.get("mac") or "").lower() != mac and str(other.get("ip") or other.get("ipAddress") or "") == str(address):
             raise ValidationError("fixed IP is currently assigned to another client")
@@ -599,7 +637,9 @@ class GuardedMutator:
     def _plan(self, operation: str, object_type: str, target: dict[str, Any], before: Any,
               after: Any, approved_state: Any, level: int, snapshot: Path,
               effects: list[str], validation: list[str], method: str, endpoint: str,
-              rollback_path: str | None = None) -> MutationPlan:
+              rollback_path: str | None = None, *, approval_before: Any = _UNSET,
+              approval_after: Any = _UNSET, approval_target: Any = _UNSET,
+              approval_context: Any = None, precondition_state: Any = _UNSET) -> MutationPlan:
         if redact(before) != before or redact(after) != after:
             raise ValidationError("exact mutation diff contains sensitive fields and cannot be safely displayed")
         diff = json_diff(before, after)
@@ -608,8 +648,27 @@ class GuardedMutator:
         identity = self.identity.as_dict()
         before_fp = state_fingerprint(approved_state)
         after_fp = state_fingerprint(after)
-        approval_fp = approval_fingerprint(identity, object_type, operation, target,
-                                           approved_state, after, diff)
+        stable_before = before if approval_before is _UNSET else approval_before
+        stable_after = after if approval_after is _UNSET else approval_after
+        stable_target = target if approval_target is _UNSET else approval_target
+        semantic_diff = json_diff(stable_before, stable_after)
+        approval_material = {
+            "controller_site": identity,
+            "target_object_type": object_type,
+            "target_identity": stable_target,
+            "before": stable_before,
+            "after": stable_after,
+            "operation": operation,
+            "semantic_diff": semantic_diff,
+            "safety_level": level,
+        }
+        if approval_context is not None:
+            approval_material["safety_context"] = approval_context
+        if redact(approval_material) != approval_material:
+            raise ValidationError("approval material contains sensitive fields and cannot be safely displayed")
+        approval_fp = approval_fingerprint(approval_material)
+        stable_precondition = approved_state if precondition_state is _UNSET else precondition_state
+        precondition_fp = state_fingerprint(stable_precondition)
         operation_id = new_operation_id()
         timestamp = utc_now()
         record = self.journal.create({
@@ -617,21 +676,32 @@ class GuardedMutator:
             "controller_identity": identity, "command": operation,
             "target": redact(target), "before_state_fingerprint": before_fp,
             "after_state_fingerprint": after_fp, "snapshot_path": str(snapshot),
+            "precondition_fingerprint": precondition_fp,
             "approval_fingerprint": approval_fp, "mutation_endpoint": endpoint,
             "mutation_method": method, "result": "PLANNED_NO_WRITE",
             "verification_result": None, "rollback_snapshot": str(snapshot),
             "rollback_attempted": False,
             "authoritative_write_count": 0,
         })
-        return MutationPlan(operation_id, timestamp, identity, operation, object_type,
-                            target, before, after, diff, level, str(snapshot), effects,
-                            validation, rollback_path or str(snapshot), before_fp, after_fp,
-                            approval_fp, approval_token(operation, target, approval_fp),
-                            method, endpoint, str(record), approved_state=approved_state)
+        return MutationPlan(
+            operation_id=operation_id, timestamp=timestamp, controller_identity=identity,
+            operation=operation, target_object_type=object_type, target_identity=target,
+            current_state=before, proposed_state=after, diff=diff, safety_level=level,
+            snapshot_path=str(snapshot), expected_generated_effects=effects,
+            validation_steps=validation, rollback_path=rollback_path or str(snapshot),
+            current_state_fingerprint=before_fp, proposed_state_fingerprint=after_fp,
+            precondition_fingerprint=precondition_fp, approval_fingerprint=approval_fp,
+            approval_token=approval_token(operation, target, approval_fp),
+            mutation_method=method, mutation_endpoint=endpoint, operation_record=str(record),
+            approved_state=approved_state, precondition_state=stable_precondition,
+            approval_material=approval_material,
+        )
 
     def _finish(self, plan: MutationPlan, *, dry_run: bool, approval: str | None,
                 freshness: Callable[[], Any], write: Callable[[], Any],
-                verify: Callable[[Any], dict[str, Any]]) -> dict[str, Any]:
+                verify: Callable[[Any], dict[str, Any]],
+                precondition: Callable[[Any], Any] | None = None,
+                runtime_validate: Callable[[Any], None] | None = None) -> dict[str, Any]:
         if dry_run:
             return {"mode": "PLAN", "write_performed": False, "plan": plan.public()}
         try:
@@ -656,11 +726,21 @@ class GuardedMutator:
             self.journal.update(Path(plan.operation_record), {"result": "REFUSED_FRESHNESS_RECHECK_FAILED",
                                 "completed_at": utc_now()})
             raise StaleApprovalError("authoritative state could not be re-fetched immediately before write") from error
-        if normalize_state(fresh_state) != normalize_state(plan.approved_state):
+        fresh_precondition = precondition(fresh_state) if precondition else fresh_state
+        if normalize_state(fresh_precondition) != normalize_state(plan.precondition_state):
             self.journal.update(Path(plan.operation_record), {"result": "REFUSED_STALE_APPROVAL",
                                 "completed_at": utc_now(),
-                                "observed_state_fingerprint": state_fingerprint(fresh_state)})
-            raise StaleApprovalError("Approved state is stale. Controller state changed after planning. Generate a new plan and obtain new approval.")
+                                "observed_precondition_fingerprint": state_fingerprint(fresh_precondition)})
+            raise StaleApprovalError("Approved state is stale: mutation preconditions changed. Generate a new plan and obtain new approval.")
+        if runtime_validate:
+            try:
+                runtime_validate(fresh_state)
+            except (MutationError, PermissionError) as error:
+                self.journal.update(Path(plan.operation_record), {
+                    "result": "REFUSED_RUNTIME_SAFETY_CHECK", "completed_at": utc_now(),
+                    "runtime_safety_error": str(error),
+                })
+                raise
         write_count = 1
         self.journal.update(Path(plan.operation_record), {"result": "WRITE_ATTEMPTED",
                             "attempted_at": utc_now(), "authoritative_write_count": write_count,
@@ -741,6 +821,15 @@ class GuardedMutator:
             related_directions = [_policy_direction(item, zones_before) for item in related_policy_before]
             related_status_before = _related(status_before, target)
             rollback_command = f"python3 scripts/mutate.py port-forward restore --snapshot {snapshot} --plan"
+            def port_forward_precondition(state: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    "target": _strip_keys(state.get("target"), VOLATILE_KEYS),
+                    "port_forwards": _stable_collection(state["port_forwards"]),
+                    "firewall_policies": _stable_collection(state["firewall_policies"], ordered=True),
+                    "firewall_zones": _stable_collection(state["firewall_zones"]),
+                }
+
+            stable_target = _strip_keys(target, VOLATILE_KEYS)
             plan = self._plan("port-forward.delete", "port-forward",
                               {"id": identifier, "name": target.get("name")},
                               target, None, approved_state, 3, snapshot,
@@ -749,7 +838,10 @@ class GuardedMutator:
                                "controller-derived objects are never directly edited"],
                               validation + ["official policies and forwarding status were fetched",
                                             "semantic duplicates, unrelated forwards/policies, and unexpected additions will be checked"],
-                              "DELETE", item_endpoint, rollback_command)
+                              "DELETE", item_endpoint, rollback_command,
+                              approval_before=stable_target, approval_after=None,
+                              approval_target={"id": identifier},
+                              precondition_state=port_forward_precondition(approved_state))
             unrelated_before = {object_id(item): item for item in current_records if object_id(item) != identifier}
             related_policy_ids = {object_id(item) for item in related_policy_before}
             unrelated_generated_before = {object_id(item): normalize_state(item) for item in policies_before
@@ -788,7 +880,8 @@ class GuardedMutator:
                         "rollback": rollback_command}
             return self._finish(plan, dry_run=dry_run, approval=approval,
                                 freshness=read_state,
-                                write=lambda: self._write("DELETE", item_endpoint), verify=verify)
+                                write=lambda: self._write("DELETE", item_endpoint), verify=verify,
+                                precondition=port_forward_precondition)
 
     def port_forward_restore(self, snapshot_path: Path, *, dry_run: bool = True,
                              approval: str | None = None) -> dict[str, Any]:
@@ -815,11 +908,28 @@ class GuardedMutator:
             policies_before = approved_state["firewall_policies"]
             status_before = approved_state["forwarding_status"]
             proposed = _strip_keys(copy.deepcopy(original), IDENTITY_KEYS | VOLATILE_KEYS)
+            if any(_port_forward_signature(item) == proposed for item in current):
+                raise StateMismatch("a semantically equivalent port forward already exists; restore would duplicate it")
             safety_snapshot = self._snapshot("port-forward-collection", old_id, current,
                                              "pre-restore port-forward collection", proposed,
                                              {"source_snapshot": str(snapshot_path)})
             target = {"source_snapshot": str(snapshot_path), "original_id": old_id,
                       "name": original.get("name")}
+            def restore_precondition(state: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    "port_forwards": _stable_collection(state["port_forwards"]),
+                    "firewall_policies": _stable_collection(state["firewall_policies"], ordered=True),
+                    "firewall_zones": _stable_collection(state["firewall_zones"]),
+                    "source_snapshot_sha256": state["source_snapshot_sha256"],
+                    "source_snapshot_state_fingerprint": state["source_snapshot_state_fingerprint"],
+                }
+
+            restore_context = {
+                "target_absent": True,
+                "semantic_duplicate_absent": True,
+                "source_snapshot_sha256": approved_state["source_snapshot_sha256"],
+                "source_snapshot_state_fingerprint": approved_state["source_snapshot_state_fingerprint"],
+            }
             plan = self._plan("port-forward.restore", "port-forward", target,
                               approved_state, proposed, approved_state, 3, safety_snapshot,
                               ["controller assigns an id and regenerates firewall policy/status objects"],
@@ -827,7 +937,12 @@ class GuardedMutator:
                                             "no existing object has the original id",
                                             "semantic restoration and unrelated state will be checked"],
                               "POST", collection_endpoint,
-                              f"pre-restore collection snapshot: {safety_snapshot}")
+                              f"pre-restore collection snapshot: {safety_snapshot}",
+                              approval_before=None, approval_after=proposed,
+                              approval_target={"original_id": old_id,
+                                               "source_snapshot_sha256": approved_state["source_snapshot_sha256"]},
+                              approval_context=restore_context,
+                              precondition_state=restore_precondition(approved_state))
             before_forwards = {object_id(item): normalize_state(item) for item in current}
             before_policy_ids = {object_id(item) for item in policies_before}
             unrelated_policies_before = {object_id(item): normalize_state(item) for item in policies_before}
@@ -873,9 +988,18 @@ class GuardedMutator:
                         "unexpected_new_policy_ids": unexpected_new_policy_ids,
                         "original_id": old_id, "new_id": new_id, "id_changed": bool(new_id and new_id != old_id),
                         "automatic_rollback": False}
+
+            def validate_restore_runtime(state: dict[str, Any]) -> None:
+                if _find(state["port_forwards"], old_id):
+                    raise StateMismatch("port forward already exists; restore would duplicate it")
+                if any(_port_forward_signature(item) == proposed for item in state["port_forwards"]):
+                    raise StateMismatch("a semantically equivalent port forward already exists; restore would duplicate it")
+
             return self._finish(plan, dry_run=dry_run, approval=approval,
                                 freshness=read_state,
-                                write=lambda: self._write("POST", collection_endpoint, proposed), verify=verify)
+                                write=lambda: self._write("POST", collection_endpoint, proposed), verify=verify,
+                                precondition=restore_precondition,
+                                runtime_validate=validate_restore_runtime)
 
     def fixed_ip_change(self, mac: str, address: str | None, *, dry_run: bool = True,
                         approval: str | None = None) -> dict[str, Any]:
@@ -925,15 +1049,54 @@ class GuardedMutator:
                                       "set fixed IP" if address else "remove fixed IP", proposed,
                                       {"api_family": "legacy/private", "endpoint": item_endpoint})
             operation = "client.fixed-ip.set" if address else "client.fixed-ip.remove"
-            network_identity = {"id": object_id(network), "name": network.get("name"),
-                                "vlan": network.get("vlan", network.get("vlan_id"))}
+            network_identity = _network_identity(network)
+            approval_before = _fixed_ip_state(current, networks)
+            approval_after = _fixed_ip_state(proposed, networks)
+            approval_target = {"id": identifier, "mac": normalized_mac,
+                               "network": network_identity}
+            def fixed_ip_precondition(state: dict[str, Any]) -> dict[str, Any]:
+                fresh_target = state.get("target")
+                if not isinstance(fresh_target, dict):
+                    return {"target_id": None}
+                return {
+                    "put_source": _strip_keys(fresh_target, VOLATILE_KEYS),
+                    "mutation_state": _fixed_ip_state(fresh_target, state["networks"]),
+                }
+
             plan = self._plan(operation, "client-configuration",
                               {"id": identifier, "mac": normalized_mac, "name": current.get("name"),
                                "network": network_identity},
                               current, proposed, approved_state, 3, snapshot,
                               ["DHCP reservation is updated; a lease renewal may be required", f"DHCP pool relationship: {pool}"],
                               validation, "PUT", item_endpoint,
-                              f"restore client object from {snapshot} with a separately approved mutation")
+                              f"restore client object from {snapshot} with a separately approved mutation",
+                              approval_before=approval_before, approval_after=approval_after,
+                              approval_target=approval_target,
+                              precondition_state=fixed_ip_precondition(approved_state))
+
+            write_source = {"before": current, "after": proposed}
+
+            def validate_runtime(state: dict[str, Any]) -> None:
+                fresh_target = state.get("target")
+                if not isinstance(fresh_target, dict) or object_id(fresh_target) != identifier:
+                    raise StateMismatch("target configured client no longer exists")
+                if str(fresh_target.get("mac") or "").lower() != normalized_mac:
+                    raise StateMismatch("target configured-client MAC changed")
+                fresh_network = _network_for_client(fresh_target, state["networks"])
+                if fresh_network is None or object_id(fresh_network) != object_id(network):
+                    raise StateMismatch("target configured client moved to a different network")
+                if address:
+                    validate_fixed_ip(address, fresh_target, state["configured_clients"],
+                                      state["active_clients"], state["networks"])
+                fresh_proposed = copy.deepcopy(fresh_target)
+                if address:
+                    fresh_proposed["use_fixedip"] = True
+                    fresh_proposed["fixed_ip"] = address
+                else:
+                    fresh_proposed["use_fixedip"] = False
+                    fresh_proposed.pop("fixed_ip", None)
+                    fresh_proposed.pop("fixedIpAddress", None)
+                write_source.update({"before": fresh_target, "after": fresh_proposed})
 
             def verify(_: Any) -> dict[str, Any]:
                 after = _records(self._get(item_endpoint))
@@ -943,7 +1106,7 @@ class GuardedMutator:
                 actual_ip = (updated or {}).get("fixed_ip") or (updated or {}).get("fixedIpAddress")
                 identity_matches = bool(updated and str(updated.get("mac") or "").lower() == normalized_mac and
                                         object_id(_network_for_client(updated, networks) or {}) == object_id(network))
-                preserved = bool(updated and all(updated.get(key) == value for key, value in current.items()
+                preserved = bool(updated and all(updated.get(key) == value for key, value in write_source["before"].items()
                                                   if key not in {"use_fixedip", "fixed_ip", "fixedIpEnabled", "fixedIpAddress"}))
                 matches = actual_enabled == expected_enabled and (not address or str(actual_ip) == address)
                 return {"verified": bool(updated) and matches and preserved and identity_matches,
@@ -954,7 +1117,9 @@ class GuardedMutator:
                         "rollback": f"restore client object from {snapshot} with a separately approved mutation"}
             return self._finish(plan, dry_run=dry_run, approval=approval,
                                 freshness=read_state,
-                                write=lambda: self._write("PUT", item_endpoint, proposed), verify=verify)
+                                write=lambda: self._write("PUT", item_endpoint, write_source["after"]), verify=verify,
+                                precondition=fixed_ip_precondition,
+                                runtime_validate=validate_runtime)
 
     def firewall_policy_create(self, policy: dict[str, Any], *, dry_run: bool = True,
                                approval: str | None = None) -> dict[str, Any]:
@@ -1020,13 +1185,28 @@ class GuardedMutator:
             target = {"id": identifier, "name": (current or proposed or {}).get("name"), "origin": "USER_DEFINED"}
             operation = f"firewall-policy.{action}"
             method = {"create": "POST", "update": "PUT", "delete": "DELETE"}[action]
+            def firewall_precondition(state: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    "target": _strip_keys(state.get("target"), VOLATILE_KEYS),
+                    "policies": _stable_collection(state["policies"], ordered=True),
+                    "zones": _stable_collection(state["zones"]),
+                    "networks": _stable_collection(state["networks"]),
+                }
+
+            stable_firewall_state = firewall_precondition(approved_state)
+            stable_firewall_before = _strip_keys(current, VOLATILE_KEYS) if current else None
             plan = self._plan(operation, "firewall-policy", target, before, proposed,
                               approved_state, 2, snapshot,
                               ["only the authoritative USER_DEFINED policy changes; normalized semantics are refetched"],
                               validation + ["complete policy order and neighboring policies are snapshotted",
                                             "unrelated policy ordering will be verified"],
                               method, item_endpoint,
-                              f"restore USER_DEFINED policy state from {snapshot} with separate approval")
+                              f"restore USER_DEFINED policy state from {snapshot} with separate approval",
+                              approval_before=stable_firewall_before,
+                              approval_after=_strip_keys(proposed, VOLATILE_KEYS),
+                              approval_target={"id": identifier, "origin": "USER_DEFINED"},
+                              approval_context=stable_firewall_state,
+                              precondition_state=stable_firewall_state)
             before_order = _policy_order_signature(policies, {identifier} if identifier else set())
 
             def write() -> Any:
@@ -1060,4 +1240,5 @@ class GuardedMutator:
                         "unrelated_policy_order_unchanged": order_unchanged,
                         "unrelated_state_unchanged": order_unchanged}
             return self._finish(plan, dry_run=dry_run, approval=approval,
-                                freshness=read_state, write=write, verify=verify)
+                                freshness=read_state, write=write, verify=verify,
+                                precondition=firewall_precondition)
