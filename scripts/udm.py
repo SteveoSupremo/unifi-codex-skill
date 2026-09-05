@@ -33,11 +33,38 @@ warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 
 
 class UDMReadError(RuntimeError):
-    """Sanitized transport error for optional read-only inventory requests."""
+    """Sanitized transport error for reads and guarded writes."""
 
-    def __init__(self, status: int | None, reason: str):
+    def __init__(self, status: int | None, reason: str, *,
+                 error_kind: str = "unknown", response_shape: str | None = None,
+                 response_body: Any = None, content_type: str | None = None):
         super().__init__(reason)
         self.status = status
+        self.error_kind = error_kind
+        self.response_shape = response_shape
+        self.response_body = response_body
+        self.content_type = content_type
+
+
+def _json_shape(value: Any) -> str:
+    if value is None:
+        return "empty"
+    if isinstance(value, dict):
+        return "object:" + ",".join(sorted(str(key) for key in value))
+    if isinstance(value, list):
+        return "array"
+    return type(value).__name__
+
+
+def _sanitize_error_body(value: Any) -> Any:
+    """Retain useful validation errors while removing authentication-like fields."""
+    blocked = ("authorization", "cookie", "csrf", "password", "secret", "token", "api_key", "apikey")
+    if isinstance(value, dict):
+        return {key: ("<redacted>" if any(marker in str(key).lower() for marker in blocked)
+                      else _sanitize_error_body(child)) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_error_body(child) for child in value]
+    return value
 
 
 def _load_dotenv() -> None:
@@ -120,7 +147,7 @@ class UDMClient:
             sys.exit(1)
         except urllib.error.URLError as e:
             if not fatal:
-                raise UDMReadError(None, "transport unavailable") from e
+                raise UDMReadError(None, "transport unavailable", error_kind="transport") from e
             raise
 
     def get(self, url: str) -> Any:
@@ -144,7 +171,27 @@ class UDMClient:
         method = method.upper()
         if method not in {"POST", "PUT", "DELETE"}:
             raise ValueError("guarded_write only accepts mutation methods")
-        return self._request(method, url, body, fatal=False)
+        data = json.dumps(body).encode() if body is not None else None
+        request = urllib.request.Request(url, data=data, headers=self.headers, method=method)
+        try:
+            with urllib.request.urlopen(request, context=self.ctx) as response:
+                raw = response.read().decode()
+                parsed = json.loads(raw) if raw else None
+                return {"_guarded_write_response": True, "status": response.status,
+                        "body": parsed, "body_shape": _json_shape(parsed)}
+        except urllib.error.HTTPError as error:
+            raw = error.read().decode()
+            try:
+                parsed = json.loads(raw) if raw else None
+            except (ValueError, TypeError):
+                parsed = "non-json"
+            safe_body = _sanitize_error_body(parsed)
+            raise UDMReadError(error.code, f"HTTP {error.code}", error_kind="http",
+                               response_shape=_json_shape(parsed), response_body=safe_body,
+                               content_type=error.headers.get_content_type() if error.headers else None) from error
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+            kind = "timeout" if isinstance(error, TimeoutError) else "transport"
+            raise UDMReadError(None, "transport unavailable", error_kind=kind) from error
 
     # ── Status / Health ──────────────────────────────────────────────────────
 

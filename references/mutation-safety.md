@@ -63,9 +63,13 @@ engine never regenerates a semantic diff beneath an old approval.
 
 Every normal operation issues at most one authoritative POST, PUT, or DELETE. All
 requests after it are GET verification. Mutation transport calls have no automatic
-retry. If a response is lost or otherwise ambiguous, the engine refetches state once
-to reconcile the outcome. A conclusively applied change is reported as reconciled; an
-uncertain result stops without retry and requires human review plus new approval.
+retry. If a response is lost or otherwise ambiguous, the engine refetches authoritative state
+to reconcile the outcome. Firewall CREATE uses bounded, short GET-only polling and a
+stable semantic fingerprint that excludes controller-assigned index, IDs, timestamps,
+response order, and derived-rule IDs. Exactly one verified semantic match is `APPLIED`;
+multiple matches are `AMBIGUOUS_REQUIRES_REVIEW`. A definitive rejected request may be
+`NOT_APPLIED`; every other uncertain result stops without retry and requires human
+review plus a fresh plan and approval.
 
 ## Controller identity, snapshots, and journal
 
@@ -128,10 +132,13 @@ references, IP/address ranges, action, protocol, connection state, IP version, a
 order. Local controller documentation remains authoritative for request schemas.
 
 Firewall snapshots contain the complete target, neighboring policies, full ID/index/
-origin ordering, and related source/destination zones. Creation requires an explicit
-validated index; the framework never chooses one. Post-write verification removes only
+origin ordering, and related source/destination zones. A create plan records intended
+placement, but the Integration v1 CREATE serializer omits response-only `id`, `index`,
+and `metadata`; the controller assigns the final ID/index. Post-write verification removes only
 the approved target/result from comparison and requires unrelated ordering to remain
-unchanged. SYSTEM_DEFINED, DERIVED, unknown-origin, and non-configurable policy refusal
+unchanged and verifies the new policy precedes the paired SYSTEM_DEFINED block. Optional
+unrestricted state/IPsec/schedule fields and all-port filters are omitted. SYSTEM_DEFINED,
+DERIVED, unknown-origin, and non-configurable policy refusal
 is enforced inside `mutationlib.py`, even when its functions are called without the CLI.
 
 Rollback never runs automatically. It is a separate mutation with a new current-state

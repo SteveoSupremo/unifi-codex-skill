@@ -21,3 +21,7 @@ write and non-GET raw branches are refused in this fork, while a small sanitized
 Port-forward and configured-client writes remain legacy/private and version-sensitive.
 Firewall-policy mutation paths use official Integration v1, but the controller-local
 Network > Integrations schema is authoritative for accepted bodies and methods.
+The official Network 10.1.84 OpenAPI contract confirms that firewall-policy CREATE uses
+the create/update DTO and that `id`, `index`, and `metadata` belong only to the response
+model. Network 10.5.67 exposes the same collection locally; serialization remains
+allowlisted and version-sensitive.

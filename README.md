@@ -15,7 +15,9 @@ authoritative write, the command refetches identity and operation-specific safet
 state. A relevant precondition change or fresh conflict stops the write, while harmless
 runtime freshness alone does not. Writes are never retried automatically after an
 ambiguous transport result. The framework instead performs read-only reconciliation
-and requires new approval if the outcome is not conclusive.
+with bounded polling and requires new approval if the outcome is not conclusive. A
+firewall CREATE is matched by stable policy semantics, never by client-planned index,
+timestamps, response order, or a generated policy ID.
 
 ## Requirements and installation
 
@@ -141,6 +143,13 @@ support is controller-version-specific; use the local Network > Integrations API
 documentation. SYSTEM_DEFINED, DERIVED, unknown-origin, and non-configurable policies
 are refused. Policy validation covers zone/network references, addresses, action,
 protocol, connection state, IP version, and order.
+The CREATE serializer uses the documented create/update DTO rather than replaying a GET
+response: it excludes response-only `id`, `index`, and `metadata`, omits unrestricted
+optional filters, and verifies controller-assigned placement after creation.
+Guarded transport records the sanitized HTTP status and response shape for 200/201/204
+variants. Empty, lost, or delayed CREATE responses are reconciled with GETs only. One
+semantic USER_DEFINED match is `APPLIED`, multiple matches remain
+`AMBIGUOUS_REQUIRES_REVIEW`, and no write is ever retried automatically.
 
 The Version 2 auditor correlates port forwards with collected device/client identity,
 network/VLAN membership, protected roles, documented topology, service-port hints, and

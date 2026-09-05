@@ -8,8 +8,9 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
 
-from mutationlib import (AmbiguousWriteError, ControllerIdentity, GuardedMutator,
-                         StaleApprovalError, StateMismatch, ValidationError)
+from mutationlib import (AmbiguousWriteError, ControllerIdentity, ControllerWriteError, GuardedMutator,
+                         StaleApprovalError, StateMismatch, ValidationError,
+                         serialize_firewall_policy_create)
 from snapshot import SnapshotError, _write_private, create_snapshot
 from unifi_common import WRITE_PHRASE
 
@@ -150,6 +151,80 @@ class FixedIpFreshnessClient(FakeMutationClient):
         return super().get(endpoint)
 
 
+class FirewallCreateResponseClient(FakeMutationClient):
+    """Model controller response variants without ever retrying POST."""
+
+    def __init__(self, mode="201", *, assigned_index=None, delay_reads=0, duplicates=1,
+                 derived=False):
+        super().__init__()
+        self.mode = mode
+        self.assigned_index = assigned_index
+        self.delay_reads = delay_reads
+        self.duplicates = duplicates
+        self.add_derived = derived
+        self.pending = None
+        self.after_post_reads = 0
+
+    def _materialize(self, body):
+        created = self._copy(body)
+        created["id"] = f"created-{len([p for p in self.policies if str(p.get('id', '')).startswith('created-')]) + 1}"
+        created.setdefault("metadata", {"origin": "USER_DEFINED"})
+        created.setdefault("index", 10002)
+        if self.assigned_index is not None:
+            created["index"] = self.assigned_index
+        self.policies.append(created)
+        for number in range(1, self.duplicates):
+            duplicate = self._copy(created)
+            duplicate["id"] = f"created-duplicate-{number}"
+            duplicate["index"] = int(created.get("index", 0)) + number
+            self.policies.append(duplicate)
+        if self.add_derived:
+            self.policies.append({
+                "id": "derived-return", "name": f"{created['name']} (Return)", "enabled": True,
+                "index": 30000, "action": {"type": "ALLOW", "allowReturnTraffic": True},
+                "source": {"zoneId": created["destination"]["zoneId"],
+                           "trafficFilter": self._copy(created["destination"].get("trafficFilter", {}))},
+                "destination": {"zoneId": created["source"]["zoneId"],
+                                "trafficFilter": self._copy(created["source"].get("trafficFilter", {}))},
+                "ipProtocolScope": self._copy(created["ipProtocolScope"]),
+                "connectionStateFilter": ["ESTABLISHED", "RELATED"],
+                "loggingEnabled": False, "metadata": {"origin": "DERIVED"},
+            })
+        return created
+
+    def get(self, endpoint):
+        clean = endpoint.split("?", 1)[0]
+        if self.pending is not None and clean.endswith("/firewall/policies"):
+            self.after_post_reads += 1
+            if self.after_post_reads >= self.delay_reads:
+                pending = self.pending
+                self.pending = None
+                self._materialize(pending)
+        return super().get(endpoint)
+
+    def post(self, endpoint, body):
+        self.calls.append(("POST", endpoint, self._copy(body)))
+        if not endpoint.endswith("/firewall/policies"):
+            return super().post(endpoint, body)
+        if self.delay_reads:
+            self.pending = self._copy(body)
+            created = None
+        elif self.mode == "timeout-none":
+            created = None
+        else:
+            created = self._materialize(body)
+        if self.mode == "timeout-appeared" or self.mode == "timeout-none":
+            raise TimeoutError("simulated response loss")
+        if self.mode == "201":
+            return {"_guarded_write_response": True, "status": 201,
+                    "body": [self._copy(created)], "body_shape": "array"}
+        if self.mode == "200-wrapper":
+            return {"_guarded_write_response": True, "status": 200,
+                    "body": {"data": [self._copy(created)]}, "body_shape": "object:data"}
+        return {"_guarded_write_response": True, "status": 204,
+                "body": None, "body_shape": "empty"}
+
+
 class MutationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -221,7 +296,7 @@ class MutationTests(unittest.TestCase):
         self.assertEqual(sum(call[0] == "DELETE" for call in client.calls), 1)
         self.assertEqual(result["completion_block"]["Authoritative write count"], 1)
         journal = json.loads(Path(result["plan"]["operation_record"]).read_text(encoding="utf-8"))
-        self.assertEqual(journal["result"], "APPLIED_VERIFIED")
+        self.assertEqual(journal["result"], "APPLIED")
         self.assertEqual(journal["authoritative_write_count"], 1)
         self.assertFalse(journal["rollback_attempted"])
 
@@ -362,7 +437,8 @@ class MutationTests(unittest.TestCase):
 
     def test_firewall_create_update_delete_dry_run(self):
         cases = [
-            ("create", lambda m: m.firewall_policy_create(policy("input"), dry_run=True)),
+            ("create", lambda m: m.firewall_policy_create(
+                policy("input", name="New Block") | {"action": {"type": "BLOCK"}}, dry_run=True)),
             ("update", lambda m: m.firewall_policy_update("user-1", {"name": "Updated", "action": {"type": "BLOCK"}}, dry_run=True)),
             ("delete", lambda m: m.firewall_policy_delete("user-1", dry_run=True)),
         ]
@@ -455,7 +531,7 @@ class MutationTests(unittest.TestCase):
         mutator = self.mutator(client, {"UNIFI_ENABLE_WRITES": WRITE_PHRASE})
         token = mutator.port_forward_restore(source, dry_run=True)["plan"]["approval_token"]
         result = mutator.port_forward_restore(source, dry_run=False, approval=token)
-        self.assertEqual(result["mode"], "RECONCILED_APPLIED_AFTER_AMBIGUOUS_RESPONSE")
+        self.assertEqual(result["mode"], "APPLIED")
         self.assertEqual(sum(call[0] == "POST" for call in client.calls), 1)
         self.assertTrue(result["verification"]["semantic_restoration"])
 
@@ -578,7 +654,8 @@ class MutationTests(unittest.TestCase):
         self.assertEqual(restore_first, restore_second)
 
         firewall_cases = (
-            lambda mutator: mutator.firewall_policy_create(policy("input"), dry_run=True),
+            lambda mutator: mutator.firewall_policy_create(
+                policy("input", name="New Block") | {"action": {"type": "BLOCK"}}, dry_run=True),
             lambda mutator: mutator.firewall_policy_update("user-1", {"name": "Updated"}, dry_run=True),
             lambda mutator: mutator.firewall_policy_delete("user-1", dry_run=True),
         )
@@ -613,6 +690,190 @@ class MutationTests(unittest.TestCase):
         with self.assertRaises(StaleApprovalError):
             mutator.fixed_ip_change("50:32:37:b2:f2:9a", "192.168.7.60", dry_run=False, approval=token)
         self.assertFalse(any(call[0] == "PUT" for call in client.calls))
+
+    @staticmethod
+    def _apple_policy():
+        desired = policy("input", name="Family to Apple TV")
+        desired["loggingEnabled"] = False
+        desired["destination"]["trafficFilter"] = {
+            "ipAddressFilter": {"items": [{"value": "192.168.7.59"}]}}
+        return desired
+
+    def _apply_firewall_create(self, client, desired=None):
+        desired = desired or self._apple_policy()
+        mutator = self.mutator(client, {"UNIFI_ENABLE_WRITES": WRITE_PHRASE})
+        token = mutator.firewall_policy_create(desired, dry_run=True)["plan"]["approval_token"]
+        return mutator.firewall_policy_create(desired, dry_run=False, approval=token)
+
+    def test_firewall_create_successful_201_with_id(self):
+        client = FirewallCreateResponseClient("201")
+        result = self._apply_firewall_create(client)
+        self.assertEqual(result["mode"], "APPLIED")
+        self.assertEqual(result["verification"]["resulting_id"], "created-1")
+        self.assertEqual(result["completion_block"]["Transport observation"]["http_status"], 201)
+        self.assertEqual(sum(call[0] == "POST" for call in client.calls), 1)
+
+    def test_firewall_create_successful_200_wrapper(self):
+        client = FirewallCreateResponseClient("200-wrapper")
+        result = self._apply_firewall_create(client)
+        self.assertEqual(result["mode"], "APPLIED")
+        self.assertEqual(result["verification"]["resulting_id"], "created-1")
+        self.assertEqual(result["completion_block"]["Transport observation"]["body_shape"], "object:data")
+
+    def test_firewall_create_empty_204_then_semantic_appearance(self):
+        client = FirewallCreateResponseClient("204")
+        result = self._apply_firewall_create(client)
+        self.assertEqual(result["mode"], "APPLIED")
+        self.assertEqual(result["verification"]["semantic_match_count"], 1)
+        self.assertEqual(result["completion_block"]["Transport observation"]["http_status"], 204)
+
+    def test_firewall_create_timeout_followed_by_semantic_appearance(self):
+        client = FirewallCreateResponseClient("timeout-appeared", delay_reads=1)
+        result = self._apply_firewall_create(client)
+        self.assertEqual(result["mode"], "APPLIED")
+        self.assertTrue(result["completion_block"]["Ambiguous write response"] is False)
+        self.assertEqual(sum(call[0] == "POST" for call in client.calls), 1)
+
+    def test_firewall_create_timeout_with_no_semantic_appearance(self):
+        client = FirewallCreateResponseClient("timeout-none")
+        with self.assertRaises(AmbiguousWriteError) as raised:
+            self._apply_firewall_create(client)
+        self.assertEqual(raised.exception.details["mode"], "AMBIGUOUS_REQUIRES_REVIEW")
+        self.assertEqual(raised.exception.details["verification"]["semantic_match_count"], 0)
+        self.assertEqual(sum(call[0] == "POST" for call in client.calls), 1)
+
+    def test_firewall_create_delayed_policy_appearance(self):
+        client = FirewallCreateResponseClient("204", delay_reads=3)
+        result = self._apply_firewall_create(client)
+        self.assertEqual(result["mode"], "APPLIED")
+        self.assertEqual(result["verification"]["reconciliation_attempts"], 3)
+        self.assertEqual(sum(call[0] == "POST" for call in client.calls), 1)
+
+    def test_firewall_create_duplicate_semantic_matches_remain_ambiguous(self):
+        client = FirewallCreateResponseClient("204", duplicates=2)
+        with self.assertRaises(AmbiguousWriteError) as raised:
+            self._apply_firewall_create(client)
+        self.assertEqual(raised.exception.details["verification"]["semantic_match_count"], 2)
+        self.assertEqual(sum(call[0] == "POST" for call in client.calls), 1)
+
+    def test_firewall_create_plan_refuses_existing_semantic_duplicate(self):
+        client = FirewallCreateResponseClient("204")
+        client.policies.append(self._apple_policy() | {"id": "already-present", "index": 12345})
+        with self.assertRaisesRegex(StateMismatch, "semantic duplicate"):
+            self.mutator(client).firewall_policy_create(self._apple_policy(), dry_run=True)
+        self.assertEqual(sum(call[0] == "POST" for call in client.calls), 0)
+
+    def test_firewall_create_accepts_controller_assigned_index(self):
+        client = FirewallCreateResponseClient("204", assigned_index=12345)
+        desired = self._apple_policy()
+        desired["index"] = 10002
+        result = self._apply_firewall_create(client, desired)
+        self.assertEqual(result["mode"], "APPLIED")
+        self.assertEqual(result["verification"]["controller_assigned_index"], 12345)
+
+    def test_firewall_create_plan_does_not_require_index(self):
+        client = FirewallCreateResponseClient("204")
+        desired = self._apple_policy()
+        desired.pop("index", None)
+        plan = self.mutator(client).firewall_policy_create(desired, dry_run=True)["plan"]
+        self.assertNotIn("index", plan["proposed_state"])
+        self.assertIn("controller-assigned order requested", json.dumps(plan))
+
+    def test_firewall_create_reports_derived_return_policy(self):
+        desired = self._apple_policy()
+        desired["action"]["allowReturnTraffic"] = True
+        client = FirewallCreateResponseClient("201", derived=True)
+        result = self._apply_firewall_create(client, desired)
+        self.assertEqual(result["mode"], "APPLIED")
+        self.assertEqual(result["verification"]["derived_return_policy_ids"], ["derived-return"])
+
+    def test_apple_tv_create_serializer_exact_contract(self):
+        desired = self._apple_policy()
+        desired.update({"index": 10002, "connectionStateFilter": None,
+                        "metadata": {"origin": "USER_DEFINED"},
+                        "id": "response-only", "generatedAt": "response-only"})
+        desired["action"]["allowReturnTraffic"] = True
+        serialized = serialize_firewall_policy_create(desired)
+        self.assertEqual(serialized, {
+            "enabled": True,
+            "name": "Family to Apple TV",
+            "action": {"type": "ALLOW", "allowReturnTraffic": True},
+            "source": {"zoneId": "zone-media"},
+            "destination": {"zoneId": "zone-gateway", "trafficFilter": {
+                "ipAddressFilter": {"items": [{"value": "192.168.7.59"}]}}},
+            "ipProtocolScope": {"ipVersion": "IPV4", "protocolFilter": "UDP"},
+            "loggingEnabled": False,
+        })
+        self.assertNotIn("connectionStateFilter", serialized)
+        self.assertNotIn("index", serialized)
+        self.assertNotIn("metadata", serialized)
+        self.assertNotIn("id", serialized)
+
+    def test_create_serializer_uses_ids_and_omits_all_ports(self):
+        desired = self._apple_policy()
+        desired["source"] = {"zoneId": "zone-internal", "trafficFilter": {
+            "type": "NETWORK", "networkFilter": {
+                "networkIds": ["network-family"], "matchOpposite": False}}}
+        desired["destination"] = {"zoneId": "zone-media", "trafficFilter": {
+            "type": "IP_ADDRESS", "ipAddressFilter": {
+                "type": "IP_ADDRESSES", "matchOpposite": False,
+                "items": [{"type": "IP_ADDRESS", "value": "192.168.7.59"}]}}}
+        desired["ipProtocolScope"] = {"ipVersion": "IPV4", "protocolFilter": {
+            "type": "PRESET", "preset": {"name": "TCP_UDP"}}}
+        desired["action"]["allowReturnTraffic"] = True
+        serialized = serialize_firewall_policy_create(desired)
+        self.assertEqual(serialized["source"]["zoneId"], "zone-internal")
+        self.assertEqual(serialized["source"]["trafficFilter"]["networkFilter"]["networkIds"],
+                         ["network-family"])
+        self.assertEqual(serialized["destination"]["zoneId"], "zone-media")
+        self.assertNotIn("portFilter", serialized["destination"]["trafficFilter"])
+        self.assertEqual(serialized["ipProtocolScope"]["protocolFilter"]["preset"]["name"], "TCP_UDP")
+        self.assertTrue(serialized["action"]["allowReturnTraffic"])
+
+    def test_exact_apple_tv_rule_serializes_to_documented_create_dto(self):
+        desired = {
+            "id": "response-only", "index": 10002,
+            "metadata": {"origin": "USER_DEFINED"},
+            "name": "Family to Apple TV", "enabled": True,
+            "action": {"type": "ALLOW", "allowReturnTraffic": True},
+            "source": {"zoneId": "4a2bcd33-6919-429f-b049-94a92d8a405d",
+                       "trafficFilter": {"type": "NETWORK", "networkFilter": {
+                           "networkIds": ["453adf12-668a-4a2e-8ef9-fbac77009b05"],
+                           "matchOpposite": False}}},
+            "destination": {"zoneId": "68f64189-15ea-499b-80d4-bfbed503f5ce",
+                            "trafficFilter": {"type": "IP_ADDRESS", "ipAddressFilter": {
+                                "type": "IP_ADDRESSES", "matchOpposite": False,
+                                "items": [{"type": "IP_ADDRESS", "value": "192.168.7.59"}]}}},
+            "ipProtocolScope": {"ipVersion": "IPV4", "protocolFilter": {
+                "type": "PRESET", "preset": {"name": "TCP_UDP"}}},
+            "connectionStateFilter": None, "loggingEnabled": False,
+        }
+        serialized = serialize_firewall_policy_create(desired)
+        self.assertEqual(set(serialized), {"enabled", "name", "action", "source",
+                                          "destination", "ipProtocolScope", "loggingEnabled"})
+        self.assertEqual(serialized["destination"]["trafficFilter"]["ipAddressFilter"]["items"],
+                         [{"type": "IP_ADDRESS", "value": "192.168.7.59"}])
+        self.assertNotIn("portFilter", serialized["destination"]["trafficFilter"])
+
+    def test_create_serializer_ignores_response_only_metadata_deterministically(self):
+        first = self._apple_policy()
+        second = copy.deepcopy(first)
+        first.update({"id": "one", "index": 10, "metadata": {"origin": "USER_DEFINED"}})
+        second.update({"id": "two", "index": 999, "metadata": {
+            "origin": "USER_DEFINED", "configurable": True}})
+        self.assertEqual(serialize_firewall_policy_create(first),
+                         serialize_firewall_policy_create(second))
+
+    def test_create_approval_fingerprint_ignores_response_only_metadata(self):
+        client = FakeMutationClient()
+        first = self._apple_policy()
+        first.update({"index": 10, "metadata": {"origin": "USER_DEFINED"}})
+        second = copy.deepcopy(first)
+        second.update({"index": 999, "metadata": {
+            "origin": "USER_DEFINED", "configurable": True}})
+        first_plan = self.mutator(client).firewall_policy_create(first, dry_run=True)["plan"]
+        second_plan = self.mutator(client).firewall_policy_create(second, dry_run=True)["plan"]
+        self.assertEqual(first_plan["approval_fingerprint"], second_plan["approval_fingerprint"])
 
 
 if __name__ == "__main__":

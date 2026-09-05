@@ -12,6 +12,7 @@ import fcntl
 import hashlib
 import ipaddress
 import json
+import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -64,6 +65,24 @@ class AmbiguousWriteError(MutationError):
     def __init__(self, message: str, details: dict[str, Any] | None = None):
         super().__init__(message)
         self.details = details or {}
+
+
+class ControllerWriteError(MutationError):
+    """Sanitized guarded-transport failure with enough detail to classify outcome."""
+
+    def __init__(self, *, status: int | None = None, error_kind: str = "unknown",
+                 response_shape: str | None = None, response_body: Any = None,
+                 content_type: str | None = None):
+        super().__init__("controller write request failed; no raw response was emitted")
+        self.status = status
+        self.error_kind = error_kind
+        self.response_shape = response_shape
+        self.response_body = response_body
+        self.content_type = content_type
+
+    @property
+    def definitively_not_applied(self) -> bool:
+        return self.error_kind == "http" and self.status is not None and 400 <= self.status < 500
 
 
 @dataclass(frozen=True)
@@ -306,6 +325,90 @@ def _semantics(value: Any) -> Any:
     return _strip_keys(value, VOLATILE_KEYS | IDENTITY_KEYS)
 
 
+def _nested_filter_values(side: dict[str, Any], filter_name: str, list_key: str) -> list[str]:
+    traffic = side.get("trafficFilter") if isinstance(side.get("trafficFilter"), dict) else {}
+    selected = traffic.get(filter_name) if isinstance(traffic.get(filter_name), dict) else {}
+    if list_key == "values":
+        return sorted(set(str(item.get("value")) for item in selected.get("items", [])
+                          if isinstance(item, dict) and item.get("value") is not None))
+    values = selected.get(list_key) or []
+    return sorted(set(str(item) for item in values))
+
+
+def _protocol_semantics(policy: dict[str, Any]) -> str:
+    scope = policy.get("ipProtocolScope") if isinstance(policy.get("ipProtocolScope"), dict) else {}
+    value = scope.get("protocolFilter")
+    if not value:
+        return "ANY"
+    if isinstance(value, str):
+        return value.upper()
+    preset = value.get("preset") if isinstance(value, dict) else None
+    protocol = value.get("protocol") if isinstance(value, dict) else None
+    return str((preset or {}).get("name") or (protocol or {}).get("name") or
+               (value or {}).get("name") or "ANY").upper()
+
+
+def _policy_semantic_projection(policy: dict[str, Any]) -> dict[str, Any]:
+    """Stable policy meaning; excludes ID, index, text, timestamps, and generated metadata."""
+    action = policy.get("action") if isinstance(policy.get("action"), dict) else {}
+    source = policy.get("source") if isinstance(policy.get("source"), dict) else {}
+    destination = policy.get("destination") if isinstance(policy.get("destination"), dict) else {}
+    scope = policy.get("ipProtocolScope") if isinstance(policy.get("ipProtocolScope"), dict) else {}
+    states = policy.get("connectionStateFilter") or []
+    if isinstance(states, dict):
+        states = states.get("states") or states.get("items") or []
+    return {
+        "origin": _policy_origin(policy),
+        "enabled": policy.get("enabled", True) is True,
+        "action": str(action.get("type") or "").upper(),
+        "allow_return_traffic": action.get("allowReturnTraffic") is True,
+        "source_zone": str(source.get("zoneId") or ""),
+        "source_networks": _nested_filter_values(source, "networkFilter", "networkIds"),
+        "source_addresses": _nested_filter_values(source, "ipAddressFilter", "values"),
+        "destination_zone": str(destination.get("zoneId") or ""),
+        "destination_networks": _nested_filter_values(destination, "networkFilter", "networkIds"),
+        "destination_addresses": _nested_filter_values(destination, "ipAddressFilter", "values"),
+        "source_ports": _nested_filter_values(source, "portFilter", "values"),
+        "destination_ports": _nested_filter_values(destination, "portFilter", "values"),
+        "protocol": _protocol_semantics(policy),
+        "ip_version": str(scope.get("ipVersion") or "IPV4_AND_IPV6").upper(),
+        "connection_states": sorted(str(state).upper() for state in states),
+        "logging": policy.get("loggingEnabled") is True,
+    }
+
+
+def _policy_semantic_matches(actual: dict[str, Any], expected: dict[str, Any]) -> bool:
+    return _policy_semantic_projection(actual) == _policy_semantic_projection(expected)
+
+
+def serialize_firewall_policy_create(policy: dict[str, Any]) -> dict[str, Any]:
+    """Serialize the Integration v1 create DTO, excluding response-only fields."""
+    required = ("enabled", "name", "action", "source", "destination", "ipProtocolScope", "loggingEnabled")
+    optional = ("description", "connectionStateFilter", "ipsecFilter", "schedule")
+    result = {key: copy.deepcopy(policy[key]) for key in required if key in policy}
+    for key in optional:
+        if policy.get(key) is not None:
+            result[key] = copy.deepcopy(policy[key])
+    return result
+
+
+def _derived_return_matches(policy: dict[str, Any], forward: dict[str, Any]) -> bool:
+    actual = _policy_semantic_projection(policy)
+    intended = _policy_semantic_projection(forward)
+    return (
+        actual["origin"] == "DERIVED" and actual["enabled"] and
+        actual["action"] == "ALLOW" and
+        set(actual["connection_states"]) == {"ESTABLISHED", "RELATED"} and
+        actual["source_zone"] == intended["destination_zone"] and
+        actual["destination_zone"] == intended["source_zone"] and
+        actual["source_addresses"] == intended["destination_addresses"] and
+        actual["protocol"] == intended["protocol"] and
+        actual["ip_version"] == intended["ip_version"] and
+        (str(policy.get("name") or "").startswith(str(forward.get("name") or "")) or
+         bool(actual["destination_networks"] or actual["destination_addresses"]))
+    )
+
+
 def _port_forward_signature(rule: dict[str, Any]) -> dict[str, Any]:
     return _semantics(rule)
 
@@ -413,7 +516,8 @@ def _collect_named_refs(value: Any, singular: str, plural: str) -> set[str]:
     return found
 
 
-def validate_policy(policy: dict[str, Any], zones: list[dict[str, Any]], networks: list[dict[str, Any]]) -> list[str]:
+def validate_policy(policy: dict[str, Any], zones: list[dict[str, Any]], networks: list[dict[str, Any]],
+                    *, require_index: bool = True) -> list[str]:
     if not isinstance(policy, dict):
         raise ValidationError("firewall policy must be a JSON object")
     origin = _policy_origin(policy)
@@ -438,7 +542,9 @@ def validate_policy(policy: dict[str, Any], zones: list[dict[str, Any]], network
     if unknown_networks:
         raise ValidationError("firewall policy references an unknown network")
     index = policy.get("index", policy.get("order"))
-    if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index <= 2147483647:
+    if index is None and not require_index:
+        pass
+    elif not isinstance(index, int) or isinstance(index, bool) or not 0 <= index <= 2147483647:
         raise ValidationError("firewall policy index/order must be an integer in controller range")
     scope = policy.get("ipProtocolScope") if isinstance(policy.get("ipProtocolScope"), dict) else {}
     ip_version = str(scope.get("ipVersion") or "IPV4_AND_IPV6").upper()
@@ -454,8 +560,10 @@ def validate_policy(policy: dict[str, Any], zones: list[dict[str, Any]], network
         raise ValidationError("firewall policy has an invalid connection-state filter")
     for address in _walk_address_values(policy):
         _validate_address(address)
+    order_validation = ("controller-assigned order requested" if index is None else
+                        "valid explicit controller order")
     return ["USER_DEFINED/configurable origin", "known source and destination zones/networks",
-            "valid action, addresses, protocol, connection state, IP version, and order"]
+            f"valid action, addresses, protocol, connection state, and IP version; {order_validation}"]
 
 
 def _network_for_client(client: dict[str, Any], networks: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -623,7 +731,31 @@ class GuardedMutator:
         except (Exception, SystemExit) as error:
             if isinstance(error, MutationError):
                 raise
-            raise MutationError("controller write request failed; no raw response was emitted") from error
+            raise ControllerWriteError(status=getattr(error, "status", None),
+                                       error_kind=getattr(error, "error_kind", "unknown"),
+                                       response_shape=getattr(error, "response_shape", None),
+                                       response_body=getattr(error, "response_body", None),
+                                       content_type=getattr(error, "content_type", None)) from error
+
+    @staticmethod
+    def _response_observation(response: Any = None, error: Exception | None = None) -> dict[str, Any]:
+        if error is not None:
+            return {"kind": getattr(error, "error_kind", "unknown"),
+                    "http_status": getattr(error, "status", None),
+                    "body_shape": getattr(error, "response_shape", None),
+                    "content_type": getattr(error, "content_type", None),
+                    "response_body": redact(getattr(error, "response_body", None))}
+        if isinstance(response, dict) and response.get("_guarded_write_response") is True:
+            return {"kind": "http", "http_status": response.get("status"),
+                    "body_shape": response.get("body_shape")}
+        return {"kind": "injected_or_legacy_transport", "http_status": None,
+                "body_shape": type(response).__name__ if response is not None else "empty"}
+
+    @staticmethod
+    def _response_body(response: Any) -> Any:
+        if isinstance(response, dict) and response.get("_guarded_write_response") is True:
+            return response.get("body")
+        return response
 
     def _snapshot(self, object_type: str, object_id_value: str, current: Any,
                   operation: str, proposed: Any, metadata: dict[str, Any] | None = None) -> Path:
@@ -639,7 +771,8 @@ class GuardedMutator:
               effects: list[str], validation: list[str], method: str, endpoint: str,
               rollback_path: str | None = None, *, approval_before: Any = _UNSET,
               approval_after: Any = _UNSET, approval_target: Any = _UNSET,
-              approval_context: Any = None, precondition_state: Any = _UNSET) -> MutationPlan:
+              approval_context: Any = None, precondition_state: Any = _UNSET,
+              request_payload: Any = _UNSET) -> MutationPlan:
         if redact(before) != before or redact(after) != after:
             raise ValidationError("exact mutation diff contains sensitive fields and cannot be safely displayed")
         diff = json_diff(before, after)
@@ -682,6 +815,8 @@ class GuardedMutator:
             "verification_result": None, "rollback_snapshot": str(snapshot),
             "rollback_attempted": False,
             "authoritative_write_count": 0,
+            "sanitized_request_payload": redact(after if request_payload is _UNSET else request_payload)
+            if method in {"POST", "PUT"} else None,
         })
         return MutationPlan(
             operation_id=operation_id, timestamp=timestamp, controller_identity=identity,
@@ -701,7 +836,9 @@ class GuardedMutator:
                 freshness: Callable[[], Any], write: Callable[[], Any],
                 verify: Callable[[Any], dict[str, Any]],
                 precondition: Callable[[Any], Any] | None = None,
-                runtime_validate: Callable[[Any], None] | None = None) -> dict[str, Any]:
+                runtime_validate: Callable[[Any], None] | None = None,
+                reconciliation_attempts: int = 1,
+                reconciliation_delay: float = 0.0) -> dict[str, Any]:
         if dry_run:
             return {"mode": "PLAN", "write_performed": False, "plan": plan.public()}
         try:
@@ -748,37 +885,62 @@ class GuardedMutator:
         try:
             response = write()
         except (Exception, SystemExit) as error:
-            try:
-                verification = verify(None)
-            except (Exception, SystemExit):
-                verification = {"verified": False, "reconciliation": "authoritative refetch failed"}
+            verification = self._bounded_reconcile(verify, None, reconciliation_attempts,
+                                                    reconciliation_delay)
             reconciled = bool(verification.get("verified"))
-            result_name = "RECONCILED_APPLIED_AFTER_AMBIGUOUS_RESPONSE" if reconciled else "AMBIGUOUS_REQUIRES_REVIEW"
+            definitive = isinstance(error, ControllerWriteError) and error.definitively_not_applied
+            result_name = "APPLIED" if reconciled else ("NOT_APPLIED" if definitive else "AMBIGUOUS_REQUIRES_REVIEW")
+            observation = self._response_observation(error=error)
             completion = self._completion(plan, write_count, verification, result_name,
-                                          ambiguous=True)
+                                          ambiguous=not definitive and not reconciled,
+                                          response_observation=observation)
             self.journal.update(Path(plan.operation_record), {"result": result_name,
                                 "completed_at": utc_now(), "verification_result": redact(verification),
-                                "write_response_ambiguous": True})
+                                "write_response_ambiguous": not definitive,
+                                "transport_observation": observation})
             if reconciled:
+                return completion
+            if definitive:
                 return completion
             raise AmbiguousWriteError(
                 "write outcome is ambiguous; no retry occurred; authoritative state did not conclusively reconcile; new approval is required",
                 completion) from error
-        verification = verify(response)
-        result_name = "APPLIED_VERIFIED" if verification.get("verified") else "APPLIED_VERIFICATION_FAILED"
+        observation = self._response_observation(response=response)
+        verification = self._bounded_reconcile(verify, self._response_body(response),
+                                                reconciliation_attempts, reconciliation_delay)
+        result_name = "APPLIED" if verification.get("verified") else "AMBIGUOUS_REQUIRES_REVIEW"
         completion = self._completion(plan, write_count, verification, result_name,
-                                      ambiguous=False)
+                                      ambiguous=not verification.get("verified"),
+                                      response_observation=observation)
         self.journal.update(Path(plan.operation_record), {"result": result_name,
                             "completed_at": utc_now(), "verification_result": redact(verification),
-                            "write_response_ambiguous": False})
+                            "write_response_ambiguous": not verification.get("verified"),
+                            "transport_observation": observation})
         if not verification.get("verified"):
-            raise VerificationError("write completed but post-write verification failed; no secondary mutation was attempted",
-                                    completion)
+            raise AmbiguousWriteError("verification failed after the write was acknowledged; authoritative state did not conclusively reconcile; no retry occurred",
+                                      completion)
         return completion
 
     @staticmethod
+    def _bounded_reconcile(verify: Callable[[Any], dict[str, Any]], response: Any,
+                           attempts: int, delay: float) -> dict[str, Any]:
+        last = {"verified": False, "reconciliation": "not attempted"}
+        for attempt in range(max(1, attempts)):
+            try:
+                last = verify(response if attempt == 0 else None)
+            except (Exception, SystemExit):
+                last = {"verified": False, "reconciliation": "authoritative refetch failed"}
+            last["reconciliation_attempts"] = attempt + 1
+            if last.get("verified") or last.get("semantic_match_count", 0) > 1:
+                return last
+            if attempt + 1 < max(1, attempts) and delay > 0:
+                time.sleep(delay)
+        return last
+
+    @staticmethod
     def _completion(plan: MutationPlan, write_count: int, verification: dict[str, Any],
-                    result_name: str, *, ambiguous: bool) -> dict[str, Any]:
+                    result_name: str, *, ambiguous: bool,
+                    response_observation: dict[str, Any] | None = None) -> dict[str, Any]:
         safe_verification = redact(verification)
         return {"mode": result_name, "write_performed": True, "plan": plan.public(),
                 "verification": safe_verification,
@@ -788,6 +950,7 @@ class GuardedMutator:
                                      "Verification": safe_verification,
                                      "Unrelated-state check": safe_verification.get("unrelated_state_unchanged", safe_verification.get("unrelated_forwards_unchanged")),
                                      "Rollback available": plan.rollback_path,
+                                     "Transport observation": response_observation or {},
                                      "Operation record": plan.operation_record}}
 
     def port_forward_delete(self, identifier: str, *, expected: dict[str, Any] | None = None,
@@ -1157,8 +1320,15 @@ class GuardedMutator:
                 validate_policy(current, zones, networks)
             if action == "create":
                 proposed = _strip_keys(copy.deepcopy(payload), IDENTITY_KEYS | VOLATILE_KEYS)
+                create_payload = serialize_firewall_policy_create(proposed)
                 before = approved_state
-                validation = validate_policy(proposed, zones, networks)
+                validation = validate_policy(proposed, zones, networks, require_index=False)
+                semantic_duplicates = [item for item in policies if _policy_semantic_matches(item, proposed)]
+                if semantic_duplicates:
+                    duplicate_ids = ", ".join(object_id(item) or "<no-id>" for item in semantic_duplicates)
+                    raise StateMismatch(f"semantic duplicate firewall policy already exists: {duplicate_ids}")
+                validation.append("semantic duplicate check: no existing USER_DEFINED policy matches the intended semantics")
+                validation.append("Integration v1 CREATE DTO excludes response-only id, index, and metadata; unrestricted optional fields are omitted")
                 snapshot_value = _policy_snapshot(policies, proposed, zones)
                 snapshot_type = "firewall-policy-collection"
                 snapshot_id = "pre-create"
@@ -1195,23 +1365,34 @@ class GuardedMutator:
 
             stable_firewall_state = firewall_precondition(approved_state)
             stable_firewall_before = _strip_keys(current, VOLATILE_KEYS) if current else None
+            create_approval_after = ({
+                "name": proposed.get("name"),
+                "description": proposed.get("description"),
+                "policy_semantics": _policy_semantic_projection(proposed),
+                "ordering": "BEFORE_SYSTEM_DEFINED",
+            } if action == "create" else _strip_keys(proposed, VOLATILE_KEYS) if proposed else None)
+            secondary_effects = ["only the authoritative USER_DEFINED policy changes; normalized semantics are refetched"]
+            if action == "create" and isinstance(proposed.get("action"), dict) and proposed["action"].get("allowReturnTraffic") is True:
+                secondary_effects.append(
+                    "controller is expected to derive a reversed ESTABLISHED/RELATED return policy; it will be discovered and verified, never mutated directly")
             plan = self._plan(operation, "firewall-policy", target, before, proposed,
                               approved_state, 2, snapshot,
-                              ["only the authoritative USER_DEFINED policy changes; normalized semantics are refetched"],
+                              secondary_effects,
                               validation + ["complete policy order and neighboring policies are snapshotted",
                                             "unrelated policy ordering will be verified"],
                               method, item_endpoint,
                               f"restore USER_DEFINED policy state from {snapshot} with separate approval",
                               approval_before=stable_firewall_before,
-                              approval_after=_strip_keys(proposed, VOLATILE_KEYS),
+                              approval_after=create_approval_after,
                               approval_target={"id": identifier, "origin": "USER_DEFINED"},
                               approval_context=stable_firewall_state,
-                              precondition_state=stable_firewall_state)
+                              precondition_state=stable_firewall_state,
+                              request_payload=create_payload if action == "create" else _UNSET)
             before_order = _policy_order_signature(policies, {identifier} if identifier else set())
 
             def write() -> Any:
                 if action == "create":
-                    return self._write("POST", collection_endpoint, proposed)
+                    return self._write("POST", collection_endpoint, create_payload)
                 if action == "update":
                     return self._write("PUT", item_endpoint, proposed)
                 return self._write("DELETE", item_endpoint)
@@ -1230,15 +1411,37 @@ class GuardedMutator:
                 resulting_id = object_id(response_records[0]) if response_records else (identifier or "")
                 actual = _find(after, resulting_id)
                 if actual is None and action == "create":
-                    actual = next((item for item in after if _contains(_semantics(item), _semantics(proposed))), None)
-                semantics_match = bool(actual and _contains(_semantics(actual), _semantics(proposed)))
+                    matches = [item for item in after if _policy_semantic_matches(item, proposed)]
+                    actual = matches[0] if len(matches) == 1 else None
+                else:
+                    matches = [actual] if actual and _policy_semantic_matches(actual, proposed) else []
+                semantics_match = len(matches) == 1
                 resulting_id = object_id(actual) if actual else resulting_id
-                order_unchanged = _policy_order_signature(after, {resulting_id}) == before_order
-                return {"verified": semantics_match and _policy_origin(actual or {}) == "USER_DEFINED" and order_unchanged,
+                derived = [item for item in after if action == "create" and
+                           _derived_return_matches(item, proposed)]
+                generated_ids = {object_id(item) for item in derived}
+                order_unchanged = _policy_order_signature(after, {resulting_id} | generated_ids) == before_order
+                paired_system_blocks = [item for item in after
+                                        if _policy_origin(item) == "SYSTEM_DEFINED" and
+                                        str((item.get("action") or {}).get("type") or "").upper() == "BLOCK" and
+                                        (item.get("source") or {}).get("zoneId") == (proposed.get("source") or {}).get("zoneId") and
+                                        (item.get("destination") or {}).get("zoneId") == (proposed.get("destination") or {}).get("zoneId")]
+                before_system_block = bool(actual and (not paired_system_blocks or
+                                           int(actual.get("index", 2147483647)) <
+                                           min(int(item.get("index", 2147483647)) for item in paired_system_blocks)))
+                return {"verified": semantics_match and _policy_origin(actual or {}) == "USER_DEFINED" and order_unchanged and before_system_block,
                         "resulting_id": object_id(actual) if actual else None,
                         "normalized_semantics_match": semantics_match, "origin": _policy_origin(actual or {}),
+                        "semantic_match_count": len(matches),
+                        "semantic_projection": _policy_semantic_projection(actual) if actual else None,
+                        "controller_assigned_index": actual.get("index") if actual else None,
+                        "derived_return_policy_ids": [object_id(item) for item in derived],
+                        "derived_return_count": len(derived),
+                        "before_system_defined_block": before_system_block,
                         "unrelated_policy_order_unchanged": order_unchanged,
                         "unrelated_state_unchanged": order_unchanged}
             return self._finish(plan, dry_run=dry_run, approval=approval,
                                 freshness=read_state, write=write, verify=verify,
-                                precondition=firewall_precondition)
+                                precondition=firewall_precondition,
+                                reconciliation_attempts=4 if action == "create" else 1,
+                                reconciliation_delay=0.25 if action == "create" else 0.0)
