@@ -1,4 +1,13 @@
 default_unknown_is_protected: true
+local_dns_records:
+  safety_level: 3
+  api_family: official/integration-v1
+  allowed_type: A_RECORD
+  required_origin: USER_DEFINED
+  unknown_schema_is_protected: true
+  system_derived_or_orchestrated_is_protected: true
+  wildcard_management: refused
+  scope: individual_local_records_only
 resources:
   - UDM Pro
   - WAN configuration

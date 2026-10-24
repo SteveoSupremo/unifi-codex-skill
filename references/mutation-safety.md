@@ -145,6 +145,48 @@ Rollback never runs automatically. It is a separate mutation with a new current-
 GET, safety snapshot, exact diff, validation, write enablement, and distinct approval
 token.
 
+## Local DNS Host (A) records
+
+`mutate.py dns` is Level 3 and supports only individual USER_DEFINED A_RECORD policies
+on exact reviewed Network releases 10.1.84, 10.5.67 and 10.6.106. It uses official
+Integration v1 DNS Policies, never private `static-dns` mutation. See
+[dns-management.md](dns-management.md) for the contract, conservative naming/conflict
+rules, eight-record NGINX Proxy Manager example, and exact commands.
+
+Plans bind the complete DNS collection (sorted by ID, preserving all fields) as both
+safety context and precondition. Apply rechecks controller/site/version identity,
+fetches every collection page, refetches the complete target by ID, and refuses
+detail/list disagreement or any concurrent collection edit before its single write.
+POST/PUT uses the documented request DTO: `type`, `enabled`, `domain`, `ipv4Address`,
+`ttlSeconds`. PUT starts with a deep-copy/minimal edit of the full target; only
+response-only `id` and `metadata` are omitted. Unknown target fields or metadata
+are refused rather than dropped. Unrelated records are never sent for replacement.
+
+An identical single user record is a journaled NO_OP with zero writes and no rollback
+snapshot needed. It does not bypass protection or ambiguity checks. Non-user records,
+unknown origins/versions/schemas, duplicates, wildcard coverage, same-owner conflicts
+and ancestor aliases/forwarding policies stop planning. Disabled conflicting records
+also stop planning; multi-address records and wildcard management are out of scope.
+
+DNS snapshots contain full before/after target objects and the complete pre-change
+collection. The existing snapshot integrity/identity gate and operation journal apply.
+Verification checks the target through GET and requires all other DNS policies to be
+unchanged. Empty/lost responses get at most four GET-only reconciliations; no mutation
+is retried. Readback failure or unexpected side effects remain ambiguous for review.
+`verify_network.py --dns-name NAME --expected-ip IP --host CONTROLLER` additionally
+checks the invoking client's resolver, separately from configuration readback.
+
+`dns restore --snapshot DIR --plan` plans only the inverse target operation. Undoing
+create also requires the resulting `--id` from successful verification and proof it
+was absent from the original snapshot. Undoing update requires the original target ID
+and expected applied state; undoing delete can receive a new controller-assigned ID,
+which is reported. Changed targets, identity mismatch or tampered snapshots refuse
+restore. A distinct restore token, exact write enablement, fresh snapshot and one-write
+gate are mandatory. Other records added since the original operation are preserved.
+No DNS operation changes DHCP, upstream resolvers, public DNS, firewall, port forwards,
+proxy settings or certificates. The API has no documented conditional-write/CAS contract;
+the immediate pre-write refetch narrows but cannot eliminate external-writer races.
+
 ## Output contract
 
 Plan JSON includes the canonical `approval_material` plus a concise `safety_block` with

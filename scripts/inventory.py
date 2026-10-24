@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 sys.path.insert(0, str(Path(__file__).parent))
 from unifi_common import load_env, redact
+from dns_api import DnsContractError, fetch_records, require_version
 
 
 INTEGRATION = "/proxy/network/integration/v1"
@@ -48,6 +49,7 @@ SITE_READS = [
     EndpointSpec("vpn_site_to_site", f"{INTEGRATION}/sites/{{site_id}}/vpn/site-to-site-tunnels{PAGE}", "official/integration-v1", "site-to-site VPN state", True),
     EndpointSpec("upnp_exposure", "/proxy/network/api/s/{internal}/stat/portforward", "legacy/private", "configured and dynamically reported forwarding/UPnP exposure"),
     EndpointSpec("ids_ips", "/proxy/network/api/s/{internal}/rest/setting/ips", "legacy/private", "IDS/IPS security settings"),
+    EndpointSpec("dns_records", f"{INTEGRATION}/sites/{{site_id}}/dns/policies{PAGE}", "official/integration-v1", "local DNS policies; pinned version/schema, complete pagination", True),
 ]
 
 
@@ -266,7 +268,21 @@ def collect_inventory(client: Any, override: str | None = None) -> dict[str, Any
         result["application_info"] = None
         result["collection_status"]["application_info"] = {"status":"unavailable","api_family":"official/integration-v1","method":"GET","endpoint":APPLICATION_INFO_ENDPOINT}
     for spec in SITE_READS:
-        value, status = _collect_spec(client, selected, spec)
+        if spec.dataset == "dns_records":
+            endpoint = spec.endpoint.format(site_id=selected.integration_id).split("?", 1)[0]
+            status = {"status": "available", "api_family": spec.api_family, "method": "GET", "endpoint": endpoint}
+            try:
+                info = app_info.get("data", app_info) if isinstance(app_info, dict) else {}
+                if isinstance(info, list):
+                    info = info[0] if len(info) == 1 else {}
+                require_version(info.get("applicationVersion") if isinstance(info, dict) else None)
+                value = fetch_records(lambda path: _get_optional(client, path, unwrap=False), endpoint)
+                status["count"] = len(value)
+            except DnsContractError:
+                value = None
+                status.update(status="unavailable", reason="DNS API version, response schema or complete collection unavailable")
+        else:
+            value, status = _collect_spec(client, selected, spec)
         result[spec.dataset] = value
         result["collection_status"][spec.dataset] = status
     result["fixed_ip_states"] = fixed_ip_states(result.get("client_configurations"),

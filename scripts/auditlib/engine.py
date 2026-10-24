@@ -19,6 +19,7 @@ DATASETS = {
     "Firewall policies": "firewall_policies", "UPnP exposure": "upnp_exposure",
     "Clients": "clients", "Wi-Fi": "wlans", "WAN interfaces": "wan_interfaces",
     "VPN": "vpn", "IDS/IPS": "ids_ips",
+    "DNS policies": "dns_records",
 }
 
 UNKNOWNS = [

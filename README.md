@@ -64,6 +64,10 @@ MAC identity, configured fixed-IP flag/address, current lease, network/VLAN, any
 network override, and whether authoritative configured state was available. Output is
 sanitized; no reservation is created by inventory.
 
+`dns_records` collects official Integration v1 DNS policies with strict complete-page
+and record-schema checks on reviewed versions. Unsupported DNS versions/schemas are
+reported unavailable without blocking the other inventory datasets.
+
 ## Commands
 
 ```bash
@@ -173,6 +177,54 @@ Generic `rollback.py` remains a plan-only diff helper. Supported port-forward ro
 is provided by `mutate.py port-forward restore`; it never executes automatically and
 requires a separate snapshot, diff, write gate, and approval token.
 
+## Guarded local DNS records
+
+Local IPv4 Host (A) records now support GET-only inspection plus guarded individual
+create, update, delete and inverse rollback at **Level 3**. Supported Network versions
+are exactly **10.1.84, 10.5.67 and 10.6.106**, based on the official versioned OpenAPI
+DNS Policies contracts. Read-only discovery on 2026-10-23 confirmed the installed
+10.6.106 controller's official DNS collection endpoint. Production writes were not
+tested; all automated mutation tests mock transport.
+
+```bash
+python3 scripts/mutate.py dns inspect --name unifi.mcclurehomelab.duckdns.org
+python3 scripts/mutate.py dns create --name unifi.mcclurehomelab.duckdns.org --ip 192.168.6.16 --ttl 300 --plan
+# Only after explicit approval of the concrete plan:
+export UNIFI_ENABLE_WRITES=I_UNDERSTAND_THIS_CHANGES_MY_NETWORK
+python3 scripts/mutate.py dns create --name unifi.mcclurehomelab.duckdns.org --ip 192.168.6.16 --ttl 300 --approve TOKEN_FROM_REVIEWED_PLAN
+export UNIFI_ENABLE_WRITES=disabled
+
+python3 scripts/mutate.py dns update --id RECORD_UUID --ttl 600 --plan
+python3 scripts/mutate.py dns delete --id RECORD_UUID --plan
+python3 scripts/mutate.py dns restore --snapshot snapshots/TIMESTAMP --plan
+# Undoing a create additionally requires its resulting ID:
+python3 scripts/mutate.py dns restore --snapshot snapshots/TIMESTAMP --id CREATED_RECORD_UUID --plan
+python3 scripts/verify_network.py --host 192.168.1.1 --dns-name unifi.mcclurehomelab.duckdns.org --expected-ip 192.168.6.16
+```
+
+The API is `/proxy/network/integration/v1/sites/{siteId}/dns/policies`, with individual
+UUID resource GET/PUT/DELETE and collection POST. Request fields are `type: A_RECORD`,
+`enabled`, `domain`, `ipv4Address`, and `ttlSeconds` (integer 0..86400). Unknown versions,
+unknown target fields/metadata, system/derived/orchestrated policies, wildcards,
+duplicate owners and conflicts are refused. Names use a conservative ASCII host-label
+subset with the API's 127-character limit. Existing identical user records are no-ops.
+The private `v2/.../static-dns` GET does not establish a write contract and is never a
+mutation fallback.
+
+DNS uses the same exact write gate, controller/site/version-bound token, complete
+snapshots and journal. A fresh whole-DNS-collection precondition check catches concurrent
+edits before the one authoritative write. Verification checks target and unrelated
+record preservation. Ambiguous responses get bounded GET-only reconciliation and no
+write retry. Rollback requires a fresh plan, separate approval and expected applied
+target state; it never overwrites the whole collection. Client DNS verification uses
+the invoking client's resolver and cache and is separate from controller readback.
+
+See [DNS management](references/dns-management.md) for API sources, limitations, safety
+details and the eight-record NGINX Proxy Manager example. All eight names point to
+192.168.6.16; the existing UniFi proxy backend `https://192.168.1.1:443` and trusted
+wildcard certificate remain configuration context. This feature does not modify DHCP,
+upstream DNS, public Duck DNS, firewall rules, forwarding, proxy settings or certificates.
+
 ## Architecture and API limitations
 
 Official local Integration API endpoints are preferred. The official API expands across sites, devices, clients, networks, Wi-Fi, firewall policies/zones, ACLs, DNS policies, traffic matching lists, VPN/WAN and switching, but exact local coverage is controller-version-specific. Legacy statistics, port forwards, older firewall objects, DPI, events, routes, and some VPN information may require undocumented/private endpoints used by upstream `udm.py`; treat them as version-sensitive.
@@ -182,17 +234,17 @@ The skill must not claim it can modify or fully inventory those physical ports.
 
 ## Git and upstream workflow
 
-This installation uses HTTPS for both remotes:
+This installation currently uses SSH for `origin` and HTTPS for `upstream`:
 
 ```text
-origin   = https://github.com/SteveoSupremo/unifi-codex-skill.git
+origin   = git@github.com:SteveoSupremo/unifi-codex-skill.git
 upstream = https://github.com/dlewis7444/unifi-claude-skill.git
 ```
 
 Configure or verify them with:
 
 ```bash
-git remote set-url origin https://github.com/SteveoSupremo/unifi-codex-skill.git
+git remote set-url origin git@github.com:SteveoSupremo/unifi-codex-skill.git
 git remote set-url upstream https://github.com/dlewis7444/unifi-claude-skill.git
 git remote -v
 git fetch upstream
@@ -200,7 +252,10 @@ git log HEAD..upstream/master
 git diff HEAD...upstream/master -- scripts/udm.py
 ```
 
-SSH URLs are an optional alternative when SSH authentication is configured; HTTPS is the current setup. Use the actual default branch reported by GitHub. Do not force-push. See `references/upstream-notes.md` for adopted concepts and scope decisions.
+HTTPS is an alternative for `origin` when configured for that authentication method.
+Inspect the actual checkout before changing any remote. Use the actual default branch
+reported by GitHub. Do not force-push. See `references/upstream-notes.md` for adopted
+concepts and scope decisions.
 
 ## Troubleshooting
 

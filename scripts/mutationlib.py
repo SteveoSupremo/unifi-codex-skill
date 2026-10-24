@@ -18,6 +18,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from dns_api import (DnsContractError, check_conflicts, domain_name, fetch_records,
+                     record_id, require_version, validate_a, validate_collection)
 from operation_journal import OperationJournal, new_operation_id, utc_now
 from snapshot import SnapshotError, create_snapshot, load_snapshot
 from unifi_common import ROOT, WRITE_PHRASE, json_diff, redact, writes_enabled
@@ -213,6 +215,8 @@ def approval_token(operation: str, target: Any, fingerprint: str) -> str:
                       "client.fixed-ip.set": "SET-FIXED-IP", "client.fixed-ip.remove": "REMOVE-FIXED-IP",
                       "firewall-policy.create": "CREATE-FW", "firewall-policy.update": "UPDATE-FW",
                       "firewall-policy.delete": "DELETE-FW"}.get(operation, "MUTATE")
+    if operation.startswith("dns-record."):
+        operation_code = operation.upper().replace("DNS-RECORD.", "DNS-")
     stable = str(target.get("id") or target.get("mac") or target.get("original_id") or "NEW")
     return f"{operation_code}-{stable[:8]}-{fingerprint[:10].upper()}"
 
@@ -881,7 +885,7 @@ class GuardedMutator:
         write_count = 1
         self.journal.update(Path(plan.operation_record), {"result": "WRITE_ATTEMPTED",
                             "attempted_at": utc_now(), "authoritative_write_count": write_count,
-                            "rollback_attempted": plan.operation == "port-forward.restore"})
+                            "rollback_attempted": plan.operation in {"port-forward.restore", "dns-record.restore"}})
         try:
             response = write()
         except (Exception, SystemExit) as error:
@@ -1283,6 +1287,224 @@ class GuardedMutator:
                                 write=lambda: self._write("PUT", item_endpoint, write_source["after"]), verify=verify,
                                 precondition=fixed_ip_precondition,
                                 runtime_validate=validate_runtime)
+
+    def _dns_records(self) -> list[dict[str, Any]]:
+        require_version(self.identity.network_version)
+        endpoint = self._official("dns/policies")
+
+        def get_raw(path: str) -> Any:
+            try:
+                optional = getattr(self.client, "get_optional", None)
+                return optional(self._url(path), unwrap=False) if optional else self.client.get(self._url(path))
+            except (Exception, SystemExit) as error:
+                raise StateMismatch("official DNS collection GET failed; private writes are never a fallback") from error
+
+        return fetch_records(get_raw, endpoint)
+
+    def dns_inspect(self, name: str | None = None) -> dict[str, Any]:
+        """Read-only discovery with the same contract checks as mutation planning."""
+        try:
+            if self.identity_reader() != self.identity:
+                raise StateMismatch("controller/site identity changed during DNS discovery")
+            records = self._dns_records()
+            if name is not None:
+                wanted = domain_name(name)
+                records = [r for r in records if domain_name(r["domain"], observed=True) == wanted]
+            return {"controller_identity": self.identity.as_dict(), "api_family": "official/integration-v1",
+                    "endpoint": self._official("dns/policies"), "records": redact(records),
+                    "write_performed": False}
+        except DnsContractError as error:
+            raise ValidationError(str(error)) from error
+
+    def dns_record(self, action: str, *, name: str | None = None, address: str | None = None,
+                   ttl: int | None = None, identifier: str | None = None,
+                   snapshot_path: Path | None = None, dry_run: bool = True,
+                   approval: str | None = None) -> dict[str, Any]:
+        """One guarded individual A record operation, including separately approved inverse."""
+        try:
+            with self._single_mutation():
+                return self._dns_record(action, name=name, address=address, ttl=ttl,
+                                        identifier=identifier, snapshot_path=snapshot_path,
+                                        dry_run=dry_run, approval=approval)
+        except DnsContractError as error:
+            raise ValidationError(str(error)) from error
+
+    def _dns_record(self, action: str, *, name: str | None, address: str | None,
+                    ttl: int | None, identifier: str | None, snapshot_path: Path | None,
+                    dry_run: bool, approval: str | None) -> dict[str, Any]:
+        if action not in {"create", "update", "delete", "restore"}:
+            raise ValidationError("unsupported DNS operation")
+        require_version(self.identity.network_version)
+        if self.identity_reader() != self.identity:
+            raise StateMismatch("controller/site identity changed during DNS discovery")
+        if identifier is not None:
+            record_id(identifier)
+        if name is not None:
+            name = domain_name(name)
+        records = self._dns_records()
+        current = _find(records, identifier) if identifier else None
+        operation = f"dns-record.{action}"
+        restored_original_id = None
+
+        def authoritative_item(item: dict[str, Any]) -> None:
+            actual = self._get(self._official("dns/policies/" + item["id"]))
+            if actual != item:
+                raise StateMismatch("DNS detail and collection GETs disagree; replan from consistent state")
+            validate_a(actual, response=True, writable=True)
+
+        if action == "restore":
+            if snapshot_path is None or any(v is not None for v in (name, address, ttl)):
+                raise ValidationError("DNS restore requires a snapshot and accepts only an optional target ID")
+            _, saved = load_snapshot(Path(snapshot_path), expected_type="dns-record",
+                                     expected_identity=self.identity.as_dict())
+            if not isinstance(saved, dict) or set(saved) != {"before", "after", "records"}:
+                raise ValidationError("unknown DNS rollback snapshot schema")
+            old, applied = saved["before"], saved["after"]
+            validate_collection(saved["records"])
+            if any(value is not None and not isinstance(value, dict) for value in (old, applied)):
+                raise ValidationError("unknown DNS rollback target schema")
+            if old is not None and _find(saved["records"], old.get("id", "")) != old:
+                raise ValidationError("DNS snapshot target does not match its pre-change collection")
+            if old is not None and applied is not None and old.get("id") != applied.get("id"):
+                raise ValidationError("DNS snapshot update changed target identity")
+            if old is None and applied is not None:
+                # Undo CREATE only by explicit resulting ID, never a name-only delete.
+                if not identifier or not current or _find(saved["records"], identifier):
+                    raise StateMismatch("undoing DNS create requires the new resulting ID absent from the original snapshot")
+                expected = validate_a(applied, response="id" in applied, writable=True)
+                if validate_a(current, response=True, writable=True) != expected:
+                    raise StateMismatch("created DNS record changed since the snapshotted operation")
+                desired = None
+                effective = "delete"
+            elif old is not None:
+                original = validate_a(old, response=True, writable=True)
+                restored_original_id = old["id"]
+                if applied is None:
+                    if identifier is not None and identifier != old["id"]:
+                        raise StateMismatch("DNS restore ID differs from deleted snapshot target")
+                    if _find(records, old["id"]):
+                        raise StateMismatch("deleted DNS record ID is present; restore requires a fresh review")
+                    identifier, current, desired, effective = None, None, original, "create"
+                else:
+                    if identifier is not None and identifier != old["id"]:
+                        raise StateMismatch("DNS restore ID differs from updated snapshot target")
+                    identifier = old["id"]
+                    current = _find(records, identifier)
+                    if not current or validate_a(current, response=True, writable=True) != validate_a(applied, response=True, writable=True):
+                        raise StateMismatch("updated DNS record changed since the snapshotted operation")
+                    desired = copy.deepcopy(current)
+                    desired.update(original)
+                    effective = "update"
+            else:
+                raise ValidationError("DNS snapshot contains no restorable operation")
+        elif action == "create":
+            if identifier is not None or snapshot_path is not None:
+                raise ValidationError("DNS create does not accept an ID or snapshot")
+            desired = {"type": "A_RECORD", "enabled": True, "domain": name,
+                       "ipv4Address": address, "ttlSeconds": 300 if ttl is None else ttl}
+            effective = "create"
+        else:
+            if not identifier or not current:
+                raise StateMismatch("DNS target ID not found in the authoritative collection")
+            if snapshot_path is not None:
+                raise ValidationError("only DNS restore accepts a snapshot")
+            validate_a(current, response=True, writable=True)
+            if action == "delete":
+                if any(v is not None for v in (name, address, ttl)):
+                    raise ValidationError("DNS delete accepts only the target ID")
+                desired = None
+            else:
+                if all(v is None for v in (name, address, ttl)):
+                    raise ValidationError("DNS update requires a name, IPv4 address or TTL change")
+                desired = copy.deepcopy(current)
+                for key, value in (("domain", name), ("ipv4Address", address), ("ttlSeconds", ttl)):
+                    if value is not None:
+                        desired[key] = value
+            effective = action
+        if current is not None:
+            authoritative_item(current)
+            if check_conflicts(records, domain_name(current["domain"]), exclude_id=identifier):
+                raise StateMismatch("duplicate or conflicting DNS record at the current hostname")
+        request = validate_a(desired, response="id" in desired, writable=True) if desired else None
+        if request is not None:
+            collisions = check_conflicts(records, request["domain"], exclude_id=identifier)
+            if collisions:
+                if effective != "create" or len(collisions) != 1:
+                    raise StateMismatch("ambiguous duplicates or conflicting DNS records")
+                existing = collisions[0]
+                if validate_a(existing, response=True, writable=True) != request:
+                    raise StateMismatch("conflicting DNS record already owns the requested hostname")
+                authoritative_item(existing)
+                return self._dns_noop(operation, existing)
+        if current is not None and desired is not None and validate_a(current, response=True, writable=True) == request:
+            return self._dns_noop(operation, current)
+
+        def stable(items: list[dict]) -> list[dict]:
+            # Preserve all reported fields; even an unrelated concurrent edit stops apply.
+            return sorted(copy.deepcopy(items), key=lambda r: r["id"])
+
+        state = stable(records)
+        endpoint = self._official("dns/policies") + ("/" + identifier if identifier else "")
+        method = {"create": "POST", "update": "PUT", "delete": "DELETE"}[effective]
+        snapshot = self._snapshot("dns-record", identifier or "pre-create",
+                                  {"before": current, "after": desired, "records": state},
+                                  operation, desired, {"api_family": "official/integration-v1"})
+        plan = self._plan(operation, "dns-record", {"id": identifier, "domain": (request or current)["domain"]},
+                          current, desired, state, 3, snapshot,
+                          ["one local Host A policy only; cached DNS answers may persist until TTL expiry"],
+                          ["pinned Network version and official DTO", "complete DNS collection and authoritative target GET",
+                           "USER_DEFINED origin; no wildcard, duplicate or conflicting owner",
+                           "refetch target semantics and all unrelated DNS policies after one write",
+                           "client DNS resolution is a separate read-only verification"],
+                          method, endpoint, f"dns restore --snapshot {snapshot} (separate plan and approval; create undo also requires resulting --id)",
+                          approval_context={"dns_records": state}, precondition_state=state,
+                          request_payload=request)
+
+        def fresh() -> list[dict]:
+            fresh_records = self._dns_records()
+            if identifier:
+                item = _find(fresh_records, identifier)
+                if not item:
+                    raise StateMismatch("DNS target disappeared before write")
+                authoritative_item(item)
+            return stable(fresh_records)
+
+        def verify(_: Any) -> dict[str, Any]:
+            after = self._dns_records()
+            if effective == "delete":
+                matches = check_conflicts(after, domain_name(current["domain"]))
+                target_ok = _find(after, identifier) is None and not matches
+                result_id = None
+                remaining = after
+            else:
+                owners = check_conflicts(after, request["domain"])
+                matches = [r for r in owners if r["type"] == "A_RECORD" and
+                           validate_a(r, response=True, writable=True) == request]
+                actual = matches[0] if len(matches) == 1 and len(owners) == 1 else None
+                result_id = actual["id"] if actual else None
+                target_ok = actual is not None and (not identifier or result_id == identifier)
+                if target_ok:
+                    authoritative_item(actual)
+                remaining = [r for r in after if r["id"] != result_id]
+            unrelated = stable(remaining) == stable([r for r in records if r["id"] != identifier])
+            return {"verified": bool(target_ok and unrelated), "semantic_match_count": len(matches),
+                    "resulting_id": result_id, "original_id": current["id"] if current else restored_original_id,
+                    "target_matches": target_ok, "unrelated_state_unchanged": unrelated,
+                    "dns_resolution_tested": False}
+
+        return self._finish(plan, dry_run=dry_run, approval=approval, freshness=fresh,
+                            precondition=stable,
+                            write=lambda: self._write(method, endpoint, request), verify=verify,
+                            reconciliation_attempts=4, reconciliation_delay=0.1)
+
+    def _dns_noop(self, operation: str, current: dict[str, Any]) -> dict[str, Any]:
+        record = self.journal.create({"operation_id": new_operation_id(), "timestamp": utc_now(),
+                                     "controller_identity": self.identity.as_dict(), "command": operation,
+                                     "target": {"id": current["id"], "domain": current["domain"]},
+                                     "result": "NO_OP", "authoritative_write_count": 0,
+                                     "rollback_attempted": False})
+        return {"mode": "NO_OP", "write_performed": False, "authoritative_write_count": 0,
+                "record": redact(current), "operation_record": str(record)}
 
     def firewall_policy_create(self, policy: dict[str, Any], *, dry_run: bool = True,
                                approval: str | None = None) -> dict[str, Any]:

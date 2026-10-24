@@ -47,6 +47,12 @@ unavailable without terminating collection or exposing raw controller error bodi
 - Read `references/security-policy.md` and `references/audit-benchmarks.md` for audits.
 - Read `references/desired-state.yaml` for drift/segmentation comparisons.
 - Read `references/upstream-notes.md` for API coverage, licensing, and upstream decisions.
+- For local Host (A) DNS inspection or changes, read `references/dns-management.md`.
+  Use `scripts/mutate.py dns inspect` for GET-only discovery; `dns create|update|delete|restore`
+  goes through the existing Level 3 gate. Only the exact reviewed Network versions
+  10.1.84, 10.5.67 and 10.6.106 are supported. Unknown versions/schemas and wildcard
+  records are refused; private `static-dns` writes are never a fallback. Each record
+  needs its own plan, explicit approval and at most one authoritative write.
 - Use `scripts/udm.py` only as the preserved low-level client. Prefer the guarded scripts for normal work.
 - Use `scripts/snapshot.py`, `scripts/rollback.py`, and `scripts/verify_network.py` for change planning and verification.
 - Use `scripts/mutate.py ... --plan` for guarded mutation plans. A later live invocation requires the exact emitted `--approve` token as well as write enablement; rollback is separately planned and approved.

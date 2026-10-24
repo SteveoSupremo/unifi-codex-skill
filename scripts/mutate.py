@@ -83,6 +83,29 @@ def parser() -> argparse.ArgumentParser:
     remove = policy_actions.add_parser("delete")
     remove.add_argument("--id", required=True)
     _approval(remove)
+
+    dns = resources.add_parser("dns", help="official local Host (A) records; Level 3, pinned API versions")
+    dns_actions = dns.add_subparsers(dest="dns_action", required=True)
+    inspect = dns_actions.add_parser("inspect", help="GET-only DNS inventory and API compatibility checks")
+    inspect.add_argument("--name", help="filter by exact hostname")
+    create_dns = dns_actions.add_parser("create", help="plan one IPv4 Host A record; an identical existing record is a no-op")
+    create_dns.add_argument("--name", required=True)
+    create_dns.add_argument("--ip", required=True)
+    create_dns.add_argument("--ttl", type=int, default=300, help="seconds, 0..86400 (default 300)")
+    _approval(create_dns)
+    update_dns = dns_actions.add_parser("update", help="minimally update one USER_DEFINED A record by UUID")
+    update_dns.add_argument("--id", required=True)
+    update_dns.add_argument("--name")
+    update_dns.add_argument("--ip")
+    update_dns.add_argument("--ttl", type=int, help="seconds, 0..86400")
+    _approval(update_dns)
+    delete_dns = dns_actions.add_parser("delete", help="delete one USER_DEFINED A record by UUID")
+    delete_dns.add_argument("--id", required=True)
+    _approval(delete_dns)
+    restore_dns = dns_actions.add_parser("restore", help="separately approved inverse of a DNS snapshot; never restores a collection")
+    restore_dns.add_argument("--snapshot", type=Path, required=True)
+    restore_dns.add_argument("--id", help="required resulting UUID when undoing a create")
+    _approval(restore_dns)
     return root
 
 
@@ -138,6 +161,15 @@ def main() -> None:
         elif args.resource == "client":
             address = args.ip if args.fixed_action == "set" else None
             result = mutator.fixed_ip_change(args.mac, address, dry_run=dry_run, approval=approval)
+        elif args.resource == "dns":
+            if args.dns_action == "inspect":
+                result = mutator.dns_inspect(args.name)
+            else:
+                result = mutator.dns_record(args.dns_action, name=getattr(args, "name", None),
+                                            address=getattr(args, "ip", None), ttl=getattr(args, "ttl", None),
+                                            identifier=getattr(args, "id", None),
+                                            snapshot_path=getattr(args, "snapshot", None),
+                                            dry_run=dry_run, approval=approval)
         elif args.policy_action == "create":
             result = mutator.firewall_policy_create(_json_file(args.input), dry_run=dry_run, approval=approval)
         elif args.policy_action == "update":
@@ -145,7 +177,8 @@ def main() -> None:
         else:
             result = mutator.firewall_policy_delete(args.id, dry_run=dry_run, approval=approval)
     except (MutationError, SnapshotError, PermissionError, ValueError) as error:
-        payload = {"error": str(error), "write_performed": False}
+        details = getattr(error, "details", None)
+        payload = {"error": str(error), "write_performed": bool(details and details.get("write_performed"))}
         if getattr(error, "details", None):
             payload["details"] = error.details
         raise SystemExit(json.dumps(payload, indent=2)) from error
