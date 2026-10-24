@@ -30,6 +30,19 @@ treated as comprehensive.
 - Expand port-forward correlation tests for inverted filters, address ranges,
   protocol constraints, and combined destination filters.
 
+## Diagnostic follow-ups
+
+- Add a guarded, bounded incident-log reader with explicit request planning. Network
+  10.x private system-log queries use POST despite their read semantics; do not
+  silently include them in the GET-only inventory or widen the mutation escape hatch.
+- Add optional current station telemetry with version-aware field mappings and
+  client identity correlation; never substitute historical `stat/alluser` for presence.
+- Add offline before/after snapshot comparisons with collection-window checks,
+  device identity matching and reboot/counter-reset handling.
+- Add client-path DNS/DHCP and UniFi uplink diagnostics with explicit coverage gaps
+  for the externally managed ProCurve. Prioritize these when incident evidence
+  points beyond the radio.
+
 ## Tests and validation
 
 - Add regression tests for every policy edge case above, including conservative

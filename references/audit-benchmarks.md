@@ -4,6 +4,11 @@ Assess WAN exposure, segmentation, IoT isolation, Guest isolation, management-pl
 
 Every finding includes severity, category, evidence, why it matters, confidence, recommendation, recommended action class, evidence type (`measured`, `reported`, `inferred`, `correlated`, `not_available`), and automation safety. Scores, when shown, are counts weighted by published severity—not opaque grades. Missing telemetry reduces confidence and never proves safety or rule inactivity.
 
+Wi-Fi, performance and health checks evaluate reported subsystem state, CPU/memory,
+radio utilization and retry percentages. See [troubleshooting.md](troubleshooting.md)
+for field mappings, local review thresholds, observation windows and verification.
+An absent threshold finding is not proof of health or a successful client application test.
+
 ## Contextual WAN severity
 
 - Critical requires compelling evidence of dangerous exposure and deficient protection; uncertainty alone is not Critical.

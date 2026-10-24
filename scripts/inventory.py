@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import sys
 from dataclasses import dataclass
@@ -250,6 +251,7 @@ def fixed_ip_states(configured: list[dict[str, Any]] | None,
 
 def collect_inventory(client: Any, override: str | None = None) -> dict[str, Any]:
     """Perform only GET requests; unsupported optional datasets do not abort collection."""
+    started = dt.datetime.now(dt.timezone.utc).isoformat()
     app_info = _get_optional(client, APPLICATION_INFO_ENDPOINT, unwrap=False)
     sites = _get_optional(client, DISCOVERY_ENDPOINT, unwrap=False)
     if isinstance(sites, dict) and sites.get("_unavailable"):
@@ -278,6 +280,8 @@ def collect_inventory(client: Any, override: str | None = None) -> dict[str, Any
     }
     result["status"] = {"health": result.pop("health"), "sysinfo": (result.pop("sysinfo") or [None])[0] if result.get("sysinfo") is not None else None}
     result["vpn"] = {"servers": result.pop("vpn_servers"), "site_to_site": result.pop("vpn_site_to_site")}
+    result["collection_started_at"] = started
+    result["collection_finished_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
     return result
 
 

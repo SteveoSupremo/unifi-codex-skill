@@ -8,6 +8,7 @@ from .exposure import assess_port_forwards, exposure_findings
 from .firewall import firewall_analysis
 from .models import PortForwardAssessment
 from .posture import ids_ips_posture, upnp_posture, vpn_posture
+from .telemetry import analyze_telemetry
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "informational": 4}
 
@@ -44,6 +45,7 @@ class AuditResult:
     vpn_posture: dict[str, Any] = field(default_factory=dict)
     ids_ips_posture: dict[str, Any] = field(default_factory=dict)
     upnp_posture: dict[str, Any] = field(default_factory=dict)
+    telemetry: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {"schema_version": 2, "scope": self.scope,
@@ -55,6 +57,7 @@ class AuditResult:
             "vpn_management_access": self.vpn_posture,
             "ids_ips_posture": self.ids_ips_posture,
             "upnp_dynamic_exposure": self.upnp_posture,
+            "telemetry": self.telemetry,
             "coverage": self.coverage, "important_unknowns": self.unknowns,
             "live_mutation": False}
 
@@ -84,6 +87,11 @@ def coverage(data: dict[str, Any]) -> dict[str, str]:
 
 
 def analyze_inventory(data: dict[str, Any], scope: str) -> AuditResult:
+    if scope in ("performance", "wifi", "health"):
+        findings, telemetry = analyze_telemetry(data, scope)
+        findings.sort(key=lambda f: SEVERITY_ORDER[f.severity])
+        return AuditResult(scope, findings, [], telemetry["coverage"],
+                           telemetry["limitations"], telemetry=telemetry)
     assessments = assess_port_forwards(data) if scope in ("all", "exposure", "firewall") else []
     findings: list[Finding] = []
     if scope in ("all", "exposure"):
@@ -97,8 +105,10 @@ def analyze_inventory(data: dict[str, Any], scope: str) -> AuditResult:
         for vlan, subnet in expected.items():
             if vlan not in seen:
                 findings.append(Finding("medium", "Desired-state drift", f"VLAN {vlan} not observed", f"Expected {subnet}", "Topology may differ or collection may be incomplete.", "medium", "VERIFY controller site and network inventory.", "reported", False, "REVIEW"))
-    if scope in ("all", "performance", "wifi", "health") and not data.get("status"):
-        findings.append(Finding("informational", "Telemetry", "Health telemetry unavailable", "No status data supplied.", "Performance cannot be assessed without evidence.", "high", "Collect read-only health/device statistics.", "not_available", False, "UNKNOWN — INVESTIGATE"))
+    telemetry = {}
+    if scope in ("all", "performance", "wifi", "health"):
+        telemetry_findings, telemetry = analyze_telemetry(data, scope)
+        findings.extend(telemetry_findings)
     findings.sort(key=lambda f: SEVERITY_ORDER[f.severity])
     vpn=vpn_posture(data); ids=ids_ips_posture(data); upnp=upnp_posture(data)
     unknowns = list(UNKNOWNS)
@@ -106,5 +116,9 @@ def analyze_inventory(data: dict[str, Any], scope: str) -> AuditResult:
         unknowns = [u for u in unknowns if not u.startswith("VPN posture")]
     if upnp.get("status","").startswith("collected"):
         unknowns = [u for u in unknowns if not u.startswith("UPnP mappings")]
-    return AuditResult(scope, findings, assessments, coverage(data), unknowns,
-        [p.as_dict() for p in policies],segmentation,policy_findings,vpn,ids,upnp)
+    audit_coverage = coverage(data)
+    if telemetry:
+        audit_coverage.update(telemetry["coverage"])
+        unknowns.extend(telemetry["limitations"])
+    return AuditResult(scope, findings, assessments, audit_coverage, unknowns,
+        [p.as_dict() for p in policies],segmentation,policy_findings,vpn,ids,upnp,telemetry)

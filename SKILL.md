@@ -21,10 +21,16 @@ Operate from this skill directory. Treat the controller as production infrastruc
 1. Confirm `.env` is ignored with `git check-ignore .env`; never display secrets.
 2. Run mocked tests before first live contact.
 3. Preview reads with `python3 scripts/inventory.py --plan`.
-4. Use `python3 scripts/inventory.py` for a sanitized inventory or `python3 scripts/audit.py <network|firewall|exposure|performance|wifi|health|all> [--report]`.
+4. Save a sanitized inventory with `python3 scripts/inventory.py --output inventory/current.json` (create `inventory/` if needed), then use `python3 scripts/audit.py <network|firewall|exposure|performance|wifi|health|all> --input inventory/current.json [--report]`.
 5. Prefer local analysis: `python3 scripts/audit.py exposure --input inventory.json`, `python3 scripts/audit.py firewall --input inventory.json`, or `python3 scripts/audit.py all --input inventory.json --report`.
 6. Use `--json` or `--json-output FILE` for machine-readable findings and correlated port-forward assessments.
 7. Distinguish evidence as `measured`, `reported`, `inferred`, `correlated`, or `not_available`. Describe uncertain rules as “candidate for review,” never “unused.”
+
+For interruptions, slow Wi-Fi, buffering, or recurring performance problems, read
+`references/troubleshooting.md`. The `wifi`, `health`, and `performance` scopes analyze
+reported radio utilization/retry percentages, device CPU/memory, and subsystem health
+where available. Check collection timestamps and metric coverage before interpreting
+findings; snapshots do not establish incident-time causes or current client presence.
 
 The auditor correlates objects but does not externally scan WAN reachability, prove that
 a configured forward is reachable, inspect downstream reverse-proxy mappings, or modify

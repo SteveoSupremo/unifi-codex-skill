@@ -47,37 +47,49 @@ def markdown(result_or_scope, findings=None) -> str:
     lines = [f"# UniFi {result.scope.title()} Audit", "",
         f"Generated: {dt.datetime.now(dt.timezone.utc).isoformat()}", "",
         "## Executive Summary", "", _executive_summary(result), ""]
-    lines += ["## Effective Segmentation Summary", ""]
-    if result.segmentation:
-        lines += ["| Relationship | Zones | State | Evidence |","| --- | --- | --- | --- |"]
-        for row in result.segmentation:
-            lines.append(f"| {row['relationship']} | {row['source_zone']} → {row['destination_zone']} | {row['state']} | {row['evidence']} |")
-    else: lines.append("Unable to determine effective segmentation from collected official policies.")
-    lines += ["", "## Firewall Policy Findings", ""]
-    if result.firewall_policy_findings:
-        for finding in result.firewall_policy_findings:
-            lines += [f"### {finding.title}","",f"- Severity: {finding.severity.title()}",f"- Evidence ({finding.evidence_type}): {finding.evidence}",f"- Why it matters: {finding.why}",f"- Recommendation: {finding.recommendation}",f"- Safe to automate: {'yes' if finding.safe_to_automate else 'no'}",""]
-    else: lines += ["No security-relevant official policy candidates were identified from normalized fields.",""]
-    lines += ["## VPN / Management Access","",result.vpn_posture.get("summary","VPN posture unavailable."),""]
-    for server in result.vpn_posture.get("servers",[]): lines.append(f"- {server['name']}: type={server['type']}, enabled={server['enabled']}")
-    if result.vpn_posture.get("caution"): lines += ["",result.vpn_posture["caution"],""]
-    lines += ["## IDS/IPS Posture","",result.ids_ips_posture.get("summary","IDS/IPS posture unavailable."),""]
-    if result.ids_ips_posture.get("material_settings"): lines.append("- Material settings: "+", ".join(f"{k}={v}" for k,v in result.ids_ips_posture["material_settings"].items()))
-    if result.ids_ips_posture.get("caution"): lines += ["",result.ids_ips_posture["caution"],""]
-    lines += ["## UPnP / Dynamic Exposure","",result.upnp_posture.get("summary","UPnP evidence unavailable."),""]
-    if result.upnp_posture.get("caution"): lines += [result.upnp_posture["caution"],""]
-    if result.port_forwards:
-        lines += ["## WAN Exposure Detail", "",
-            "| Name | WAN | Proto | Destination | Role | Source Scope | Classification | Severity |",
-            "| --- | ---: | --- | --- | --- | --- | --- | --- |"]
-        for a in result.port_forwards:
-            destination = f"{a.internal_ip}:{a.internal_port} ({a.network})"
-            lines.append(f"| {a.name} | {a.wan_port} | {a.protocol} | {destination} | {a.destination_role} | {a.source_restriction} | {a.exposure_class} | {a.severity.title()} |")
-        lines.append("")
-        lines.append("Policy correlation:")
-        lines.append("")
-        for a in result.port_forwards: lines.append(f"- {a.name}: {a.firewall_correlation}")
-        lines.append("")
+    if result.telemetry:
+        telemetry = result.telemetry
+        lines += ["## Reported Telemetry", "",
+            f"Collection window (UTC): {telemetry.get('collection_started_at') or 'unknown'} to {telemetry.get('collection_finished_at') or 'unknown'}.",
+            "These are snapshot observations; report generation time is not observation time.", "",
+            "| Entity | Metric | Reported value |", "| --- | --- | --- |"]
+        for row in telemetry.get("observations", []):
+            cells = [row["entity"], row["metric"], f"{row['value']}{'%' if row.get('unit') == 'percent' else ''}"]
+            lines.append("| " + " | ".join(str(cell).replace("|", "\\|").replace("\n", " ") for cell in cells) + " |")
+        lines += ["", "Review thresholds (percent; investigation heuristics): " +
+                  ", ".join(f"{key} ≥ {value}" for key, value in telemetry["review_thresholds_percent"].items()), ""]
+    if result.scope not in ("performance", "wifi", "health"):
+        lines += ["## Effective Segmentation Summary", ""]
+        if result.segmentation:
+            lines += ["| Relationship | Zones | State | Evidence |","| --- | --- | --- | --- |"]
+            for row in result.segmentation:
+                lines.append(f"| {row['relationship']} | {row['source_zone']} → {row['destination_zone']} | {row['state']} | {row['evidence']} |")
+        else: lines.append("Unable to determine effective segmentation from collected official policies.")
+        lines += ["", "## Firewall Policy Findings", ""]
+        if result.firewall_policy_findings:
+            for finding in result.firewall_policy_findings:
+                lines += [f"### {finding.title}","",f"- Severity: {finding.severity.title()}",f"- Evidence ({finding.evidence_type}): {finding.evidence}",f"- Why it matters: {finding.why}",f"- Recommendation: {finding.recommendation}",f"- Safe to automate: {'yes' if finding.safe_to_automate else 'no'}",""]
+        else: lines += ["No security-relevant official policy candidates were identified from normalized fields.",""]
+        lines += ["## VPN / Management Access","",result.vpn_posture.get("summary","VPN posture unavailable."),""]
+        for server in result.vpn_posture.get("servers",[]): lines.append(f"- {server['name']}: type={server['type']}, enabled={server['enabled']}")
+        if result.vpn_posture.get("caution"): lines += ["",result.vpn_posture["caution"],""]
+        lines += ["## IDS/IPS Posture","",result.ids_ips_posture.get("summary","IDS/IPS posture unavailable."),""]
+        if result.ids_ips_posture.get("material_settings"): lines.append("- Material settings: "+", ".join(f"{k}={v}" for k,v in result.ids_ips_posture["material_settings"].items()))
+        if result.ids_ips_posture.get("caution"): lines += ["",result.ids_ips_posture["caution"],""]
+        lines += ["## UPnP / Dynamic Exposure","",result.upnp_posture.get("summary","UPnP evidence unavailable."),""]
+        if result.upnp_posture.get("caution"): lines += [result.upnp_posture["caution"],""]
+        if result.port_forwards:
+            lines += ["## WAN Exposure Detail", "",
+                "| Name | WAN | Proto | Destination | Role | Source Scope | Classification | Severity |",
+                "| --- | ---: | --- | --- | --- | --- | --- | --- |"]
+            for a in result.port_forwards:
+                destination = f"{a.internal_ip}:{a.internal_port} ({a.network})"
+                lines.append(f"| {a.name} | {a.wan_port} | {a.protocol} | {destination} | {a.destination_role} | {a.source_restriction} | {a.exposure_class} | {a.severity.title()} |")
+            lines.append("")
+            lines.append("Policy correlation:")
+            lines.append("")
+            for a in result.port_forwards: lines.append(f"- {a.name}: {a.firewall_correlation}")
+            lines.append("")
     for severity in ("critical", "high", "medium", "low", "informational"):
         group = [finding for finding in result.findings if finding.severity == severity and finding not in result.firewall_policy_findings]
         if group:
