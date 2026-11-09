@@ -50,7 +50,7 @@ unavailable without terminating collection or exposing raw controller error bodi
 - For local Host (A) DNS inspection or changes, read `references/dns-management.md`.
   Use `scripts/mutate.py dns inspect` for GET-only discovery; `dns create|update|delete|restore`
   goes through the existing Level 3 gate. Only the exact reviewed Network versions
-  10.1.84, 10.5.67 and 10.6.106 are supported. Unknown versions/schemas and wildcard
+  10.1.84, 10.5.67, 10.6.106 and 10.6.109 are supported. Unknown versions/schemas and wildcard
   records are refused; private `static-dns` writes are never a fallback. Each record
   needs its own plan, explicit approval and at most one authoritative write.
 - Use `scripts/udm.py` only as the preserved low-level client. Prefer the guarded scripts for normal work.

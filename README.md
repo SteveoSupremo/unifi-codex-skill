@@ -181,9 +181,9 @@ requires a separate snapshot, diff, write gate, and approval token.
 
 Local IPv4 Host (A) records now support GET-only inspection plus guarded individual
 create, update, delete and inverse rollback at **Level 3**. Supported Network versions
-are exactly **10.1.84, 10.5.67 and 10.6.106**, based on the official versioned OpenAPI
-DNS Policies contracts. Read-only discovery on 2026-10-23 confirmed the installed
-10.6.106 controller's official DNS collection endpoint. Production writes were not
+are exactly **10.1.84, 10.5.67, 10.6.106 and 10.6.109**, based on the official versioned OpenAPI
+DNS Policies contracts. Read-only inspection on 2026-11-08 confirmed the installed
+10.6.109 controller's official DNS collection endpoint. Production writes were not
 tested; all automated mutation tests mock transport.
 
 ```bash

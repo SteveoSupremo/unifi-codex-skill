@@ -148,7 +148,7 @@ token.
 ## Local DNS Host (A) records
 
 `mutate.py dns` is Level 3 and supports only individual USER_DEFINED A_RECORD policies
-on exact reviewed Network releases 10.1.84, 10.5.67 and 10.6.106. It uses official
+on exact reviewed Network releases 10.1.84, 10.5.67, 10.6.106 and 10.6.109. It uses official
 Integration v1 DNS Policies, never private `static-dns` mutation. See
 [dns-management.md](dns-management.md) for the contract, conservative naming/conflict
 rules, eight-record NGINX Proxy Manager example, and exact commands.

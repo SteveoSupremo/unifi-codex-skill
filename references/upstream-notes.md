@@ -29,10 +29,11 @@ allowlisted and version-sensitive.
 DNS management uses official Integration v1 rather than reverse-engineering the
 private `static-dns` read endpoint. The primary public OpenAPI documents for Network
 [10.1.84](https://developer.ui.com/network/v10.1.84/openapi.json),
-[10.5.67](https://developer.ui.com/network/v10.5.67/openapi.json), and
-[10.6.106](https://developer.ui.com/network/v10.6.106/openapi.json) expose the same A
+[10.5.67](https://developer.ui.com/network/v10.5.67/openapi.json),
+[10.6.106](https://developer.ui.com/network/v10.6.106/openapi.json), and
+[10.6.109](https://developer.ui.com/network/v10.6.109/openapi.json) expose the same A
 record DTO, paginated collection, collection POST and individual GET/PUT/DELETE.
-Read-only discovery on 2026-10-23 now reports Network 10.6.106 and confirms a valid
+Read-only discovery on 2026-10-23 reported Network 10.6.106 and confirms a valid
 empty official DNS collection. Runtime origin/schema checks and an exact version
 allowlist constrain writes; no live DNS mutation was tested. See
 [dns-management.md](dns-management.md) for contract fields and remaining limitations.

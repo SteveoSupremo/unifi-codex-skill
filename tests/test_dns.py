@@ -29,7 +29,7 @@ OTHER = "22222222-2222-4222-8222-222222222222"
 NEW = "33333333-3333-4333-8333-333333333333"
 NAME = "unifi.mcclurehomelab.duckdns.org"
 ADDRESS = "192.168.6.16"
-IDENTITY = ControllerIdentity("udm.test", "site", "default", "Test Site", "10.6.106")
+IDENTITY = ControllerIdentity("udm.test", "site", "default", "Test Site", "10.6.109")
 
 
 def a_record(identifier=TARGET, name=NAME, address=ADDRESS, **extra):
@@ -134,6 +134,16 @@ class DnsTests(unittest.TestCase):
         for version in ("unknown", "10.6.107", "9.0.0", "10.6.106-beta"):
             with self.subTest(version=version), self.assertRaises(DnsContractError):
                 require_version(version)
+
+    def test_version_error_identifies_upgrade_and_sanitizes_untrusted_text(self):
+        with self.assertRaises(DnsContractError) as error:
+            require_version("10.6.110")
+        self.assertIn("10.6.110", str(error.exception))
+        self.assertIn("10.6.109", str(error.exception))
+        with self.assertRaises(DnsContractError) as error:
+            require_version("secret-controller-response\ncredential")
+        self.assertNotIn("secret-controller-response", str(error.exception))
+        self.assertNotIn("credential", str(error.exception))
 
     def test_inspect_filters_and_only_reads(self):
         c = DnsClient([a_record(), a_record(OTHER, "other.example.test")])
@@ -479,7 +489,7 @@ class DnsTests(unittest.TestCase):
         c.records[0]["ttlSeconds"] = 900
         with self.assertRaises(StateMismatch):
             m.dns_record("restore", snapshot_path=Path(p["snapshot_path"]))
-        identity = ControllerIdentity("other.test", "site", "default", "Test Site", "10.6.106")
+        identity = ControllerIdentity("other.test", "site", "default", "Test Site", "10.6.109")
         with self.assertRaises(SnapshotError):
             self.mutator(c, identity=identity).dns_record("restore", snapshot_path=Path(p["snapshot_path"]))
         c = DnsClient([a_record(OTHER, "other.test"), {"id": TARGET, "type": "TXT_RECORD", "enabled": True,
@@ -536,7 +546,7 @@ class DnsInventoryTests(unittest.TestCase):
 
     def test_inventory_and_plan_show_official_dns_and_unknown_version_unavailable(self):
         class InventoryClient(FakeClient):
-            version = "10.6.106"
+            version = "10.6.109"
             def get_optional(self, url, *, unwrap=True):
                 if url.endswith("/integration/v1/info"):
                     return {"applicationVersion": self.version}

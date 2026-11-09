@@ -1,6 +1,6 @@
 """Pinned official Integration v1 DNS contract; no mutation transport here.
 
-Reviewed public OpenAPI: Network 10.1.84, 10.5.67, 10.6.106.
+Reviewed public OpenAPI: Network 10.1.84, 10.5.67, 10.6.106, 10.6.109.
 See references/dns-management.md for provenance and intentional restrictions.
 """
 from __future__ import annotations
@@ -11,7 +11,7 @@ import re
 import uuid
 from typing import Any, Callable
 
-SUPPORTED_VERSIONS = frozenset({"10.1.84", "10.5.67", "10.6.106"})
+SUPPORTED_VERSIONS = frozenset({"10.1.84", "10.5.67", "10.6.106", "10.6.109"})
 REQUEST_FIELDS = frozenset({"type", "enabled", "domain", "ipv4Address", "ttlSeconds"})
 RECORD_FIELDS = REQUEST_FIELDS | {"id", "metadata"}
 RECORD_TYPES = {"A_RECORD", "AAAA_RECORD", "CNAME_RECORD", "MX_RECORD", "TXT_RECORD",
@@ -25,7 +25,14 @@ class DnsContractError(ValueError):
 
 def require_version(version: str) -> None:
     if version not in SUPPORTED_VERSIONS:
-        raise DnsContractError("unsupported Network version for DNS; review its official OpenAPI contract first")
+        # Only echo a bounded version identifier, never arbitrary controller text.
+        detected = version if isinstance(version, str) and re.fullmatch(r"[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(?:[-+][A-Za-z0-9.-]{1,32})?", version) else "unknown/unrecognized"
+        supported = ", ".join(sorted(SUPPORTED_VERSIONS, key=lambda v: tuple(map(int, v.split(".")))))
+        raise DnsContractError(
+            f"unsupported Network version for DNS: {detected}; reviewed versions: {supported}. "
+            "Review this build's official OpenAPI DNS contract and update the skill's "
+            "scripts/dns_api.py allowlist and tests; see references/dns-management.md."
+        )
 
 
 def record_id(value: Any) -> str:

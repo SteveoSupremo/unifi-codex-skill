@@ -8,18 +8,23 @@ GET `/proxy/network/integration/v1/info`; site discovery is GET
 `/proxy/network/integration/v1/sites`. All optional reads appear in `inventory.py --plan`.
 `mutate.py dns inspect` performs version/site discovery and GET-only DNS collection.
 
-Supported versions are **exactly 10.1.84, 10.5.67, and 10.6.106**. They share the reviewed
+Supported versions are **exactly 10.1.84, 10.5.67, 10.6.106, and 10.6.109**. They share the reviewed
 A-record DTO and individual resource methods. The public, primary-source OpenAPI
 documents are [10.1.84](https://developer.ui.com/network/v10.1.84/openapi.json),
-[10.5.67](https://developer.ui.com/network/v10.5.67/openapi.json), and
-[10.6.106](https://developer.ui.com/network/v10.6.106/openapi.json).
-Reviewed 2026-10-23. No assumption of compatibility with intervening or future builds;
+[10.5.67](https://developer.ui.com/network/v10.5.67/openapi.json),
+[10.6.106](https://developer.ui.com/network/v10.6.106/openapi.json), and
+[10.6.109](https://developer.ui.com/network/v10.6.109/openapi.json).
+Reviewed 2026-11-08. The 10.6.109 document identifies itself as that version; both
+DNS path definitions and all 29 transitively referenced schemas (including discriminator
+mappings) are identical to 10.6.106. All API paths and components also compare equal. No assumption of compatibility with intervening or future builds;
 extend the allowlist only after reviewing that build's DNS contracts and tests.
 
 Read-only discovery on 2026-10-23 reported installed Network **10.6.106**, with a valid,
 empty official paginated DNS collection. No production writes were attempted. Existing
 record shapes and mutation outcomes are tested with synthetic fixtures from the
 published contract; this is contract-verified support, not a claim of live write testing.
+GET-only inspection on 2026-11-08 confirmed installed Network **10.6.109** and
+successfully validated nine DNS policies with writes explicitly disabled.
 
 | Operation | Method | Official path after `/proxy/network/integration` |
 | --- | --- | --- |
@@ -42,6 +47,21 @@ The private, version-sensitive GET
 `/proxy/network/v2/api/site/{internalReference}/static-dns` is prior read evidence
 only. Its fields and write behavior are not this implementation's contract. There
 is no private write fallback, SSH, direct config editing, or delete/recreate update.
+
+## Updating compatibility after a controller upgrade
+
+The installed skill may be a symlink: resolve it with `readlink -f ~/.agents/skills/unifi`
+before editing. Discover the **Network application** version using Integration `/v1/info`;
+do not substitute the UniFi OS or device firmware version. The runtime allowlist lives in
+`scripts/dns_api.py`; editing this document alone does not add support.
+
+For a new build, retrieve its exact versioned official OpenAPI document, check its
+`info.version`, and compare both DNS paths plus all transitively referenced schemas and
+discriminator mappings against a reviewed build. If unavailable or incompatible, keep
+writes blocked and report the missing evidence or required implementation changes.
+After review, update the exact allowlist, documentation and mocked tests; rerun the suite
+and perform GET-only inspection with `UNIFI_ENABLE_WRITES=disabled`. Never replace the
+allowlist with a major/minor range or treat a successful GET as proof of write compatibility.
 
 ## Scope and validation
 
