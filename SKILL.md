@@ -43,6 +43,11 @@ unavailable without terminating collection or exposing raw controller error bodi
 
 ## Resources
 
+- For Open WebUI or MCP deployment, read `references/mcp-open-webui.md`. The optional
+  Streamable HTTP server is strictly GET-only, requires its own bearer token, and has
+  no mutation tools. Never relax its transport guard to support newer event APIs.
+  Keep its Docker endpoint on the private Open WebUI network without published ports.
+
 - Read `references/homelab-topology.md` for topology or port analysis.
 - Read `references/security-policy.md` and `references/audit-benchmarks.md` for audits.
 - Read `references/desired-state.yaml` for drift/segmentation comparisons.
@@ -54,6 +59,9 @@ unavailable without terminating collection or exposing raw controller error bodi
   records are refused; private `static-dns` writes are never a fallback. Each record
   needs its own plan, explicit approval and at most one authoritative write.
 - Use `scripts/udm.py` only as the preserved low-level client. Prefer the guarded scripts for normal work.
+- For changing an existing port forward's destination IP on Network 10.6.106, read
+  `references/port-forward-updates.md`. Use guarded `port-forward update` and a separate
+  `port-forward revert` plan for rollback; only same-LAN destination changes are supported.
 - Use `scripts/snapshot.py`, `scripts/rollback.py`, and `scripts/verify_network.py` for change planning and verification.
 - Use `scripts/mutate.py ... --plan` for guarded mutation plans. A later live invocation requires the exact emitted `--approve` token as well as write enablement; rollback is separately planned and approved.
 - Treat approval identity, authoritative preconditions, and runtime conflict checks separately. Tokens bind stable semantic mutation material; every apply still refetches relevant state and reruns conflicts immediately before its one write.

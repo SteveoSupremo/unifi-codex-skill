@@ -31,6 +31,17 @@ python3 /path/to/skill-creator/scripts/quick_validate.py /absolute/path/unifi-co
 
 Invoke with `$unifi`, or ask Codex to audit UniFi/network health, exposure, firewall policy, Wi-Fi, performance, or drift.
 
+### Optional read-only MCP server for Open WebUI
+
+The Streamable HTTP server exposes nine authenticated read-only tools at `/mcp`.
+Install its optional dependencies with `.venv/bin/pip install -r requirements-mcp.txt`
+after creating a virtual environment. The existing CLI remains standard-library-only.
+See [MCP deployment and Open WebUI configuration](references/mcp-open-webui.md) for
+the complete setup, tool coverage, token generation, tests, and Docker Compose commands.
+The provided Compose service joins `open-webui_default` without publishing host ports;
+the proposed Open WebUI URL is `http://unifi-mcp:8765/mcp` with Bearer authentication.
+MCP never exposes controller mutations and refuses non-GET controller transport.
+
 ## API key and read-only first run
 
 Generate a local key in UniFi Network's Control Plane/Integrations settings (the exact UI varies by Network release), then:

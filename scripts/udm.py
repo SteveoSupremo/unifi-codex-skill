@@ -104,7 +104,9 @@ def get_api_key() -> str:
 
 
 class UDMClient:
-    def __init__(self, host: str, api_key: str):
+    def __init__(self, host: str, api_key: str, *, timeout: float | None = None, opener: Any = None):
+        self.timeout = timeout
+        self.opener = opener
         self.base = f"https://{host}"
         self.site = DEFAULT_SITE
         self.headers = {
@@ -130,7 +132,11 @@ class UDMClient:
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(url, data=data, headers=self.headers, method=method)
         try:
-            with urllib.request.urlopen(req, context=self.ctx) as resp:
+            open_request = self.opener.open if self.opener is not None else urllib.request.urlopen
+            options = {"timeout": self.timeout} if self.timeout is not None else {}
+            if self.opener is None:
+                options["context"] = self.ctx
+            with open_request(req, **options) as resp:
                 raw = resp.read().decode()
                 if not raw:
                     return {}

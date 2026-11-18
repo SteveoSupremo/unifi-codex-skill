@@ -212,6 +212,8 @@ def approval_fingerprint(material: Any) -> str:
 
 def approval_token(operation: str, target: Any, fingerprint: str) -> str:
     operation_code = {"port-forward.delete": "DELETE-PF", "port-forward.restore": "RESTORE-PF",
+                      "port-forward.update": "UPDATE-PF",
+                      "port-forward.revert": "REVERT-PF",
                       "client.fixed-ip.set": "SET-FIXED-IP", "client.fixed-ip.remove": "REMOVE-FIXED-IP",
                       "firewall-policy.create": "CREATE-FW", "firewall-policy.update": "UPDATE-FW",
                       "firewall-policy.delete": "DELETE-FW"}.get(operation, "MUTATE")
@@ -885,7 +887,7 @@ class GuardedMutator:
         write_count = 1
         self.journal.update(Path(plan.operation_record), {"result": "WRITE_ATTEMPTED",
                             "attempted_at": utc_now(), "authoritative_write_count": write_count,
-                            "rollback_attempted": plan.operation in {"port-forward.restore", "dns-record.restore"}})
+                            "rollback_attempted": plan.operation in {"port-forward.restore", "port-forward.revert", "dns-record.restore"}})
         try:
             response = write()
         except (Exception, SystemExit) as error:
@@ -956,6 +958,140 @@ class GuardedMutator:
                                      "Rollback available": plan.rollback_path,
                                      "Transport observation": response_observation or {},
                                      "Operation record": plan.operation_record}}
+
+    def port_forward_update(self, identifier: str, address: str, *, expected: dict[str, Any] | None = None,
+                            dry_run: bool = True, approval: str | None = None,
+                            _restore_snapshot: Path | None = None) -> dict[str, Any]:
+        """Full-object legacy PUT changing only fwd, on the observed 10.6.106 schema."""
+        with self._single_mutation():
+            if self.identity.network_version != "10.6.106":
+                raise ValidationError("destination-IP updates support only Network 10.6.106")
+            if not identifier or any(c not in "0123456789abcdef" for c in identifier) or len(identifier) != 24:
+                raise ValidationError("port-forward id must be a legacy 24-character hexadecimal id")
+            try:
+                ip = ipaddress.IPv4Address(address)
+            except (ValueError, TypeError) as error:
+                raise ValidationError("forward destination must be an IPv4 address") from error
+            if ip.is_multicast or ip.is_unspecified or ip.is_loopback or ip.is_link_local:
+                raise ValidationError("forward destination must be a routable LAN address")
+            collection = self._legacy("rest/portforward")
+            endpoint = f"{collection}/{identifier}"
+
+            def read_state():
+                records = _records(self._get(collection))
+                targets = _records(self._get(endpoint))
+                if len(targets) != 1 or object_id(targets[0]) != identifier:
+                    raise StateMismatch("expected exactly one authoritative target port forward")
+                matches = [r for r in records if object_id(r) == identifier]
+                if len(matches) != 1 or normalize_state(matches[0]) != normalize_state(targets[0]):
+                    raise StateMismatch("port-forward collection and target disagree")
+                return {"target": targets[0], "port_forwards": records,
+                        "networks": _records(self._get(self._legacy("rest/networkconf"))),
+                        "firewall_policies": self._get_official_collection("firewall/policies"),
+                        "firewall_zones": self._get_official_collection("firewall/zones"),
+                        "forwarding_status": _records(self._get(self._legacy("stat/portforward")))}
+
+            state = read_state()
+            target = state["target"]
+            allowed = {"_id", "site_id", "name", "enabled", "fwd", "fwd_port", "dst_port", "proto",
+                       "pfwd_interface", "log", "src", "src_limiting_enabled", "destination_ip", "destination_ips"}
+            if set(target) - allowed or not {"_id", "site_id", "fwd", "fwd_port", "dst_port", "proto", "enabled"} <= set(target):
+                raise ValidationError("unreviewed port-forward schema; destination update refused")
+            if target["proto"] not in {"tcp", "udp", "tcp_udp"} or not isinstance(target["enabled"], bool):
+                raise ValidationError("unreviewed port-forward protocol or enablement")
+            verify_expected(target, expected)
+            if _restore_snapshot is not None:
+                manifest, original = load_snapshot(_restore_snapshot, expected_type="port-forward-update",
+                                                    expected_identity=self.identity.as_dict())
+                if target != manifest.get("intended_change") or original.get("fwd") != str(ip):
+                    raise StateMismatch("updated target changed since snapshot; revert refused")
+            try:
+                old_ip = ipaddress.IPv4Address(target["fwd"])
+            except ValueError as error:
+                raise ValidationError("existing destination is not IPv4") from error
+            subnets = []
+            for network in state["networks"]:
+                if network.get("ip_subnet"):
+                    try:
+                        interface = ipaddress.IPv4Interface(network["ip_subnet"])
+                    except ValueError:
+                        continue
+                    if old_ip in interface.network:
+                        subnets.append(interface)
+            if len(subnets) != 1 or ip not in subnets[0].network:
+                raise ValidationError("destination must remain within the same unambiguous configured LAN subnet")
+            subnet = subnets[0]
+            if ip in {subnet.ip, subnet.network.network_address, subnet.network.broadcast_address}:
+                raise ValidationError("destination cannot be a gateway, network or broadcast address")
+            if old_ip == ip:
+                return {"mode": "NO_OP", "write_performed": False, "reason": "destination already matches"}
+            proposed = copy.deepcopy(target)
+            proposed["fwd"] = str(ip)
+            snapshot = self._snapshot("port-forward-update", identifier, target, "update forward destination", proposed,
+                                      {"api_family": "legacy/private", "endpoint": endpoint})
+            rollback = f"python3 scripts/mutate.py port-forward revert --snapshot {snapshot} --plan"
+            def precondition(s):
+                return {k: _stable_collection(v, ordered=k == "firewall_policies") if isinstance(v, list) else v
+                        for k, v in s.items() if k != "forwarding_status"}
+            operation = "port-forward.revert" if _restore_snapshot is not None else "port-forward.update"
+            plan = self._plan(operation, "port-forward-update", {"id": identifier, "name": target.get("name")},
+                              target, proposed, state, 3, snapshot,
+                              ["same public ports, protocol, interfaces, source restrictions and enablement",
+                               "controller regenerates related firewall/status objects for the new destination",
+                               "all matching proxy hosts may become internet-accessible"],
+                              ["full target GET matches collection; same configured LAN subnet",
+                               "only fwd changes; full object preserved",
+                               "verify related generated destinations and all unrelated forwards/policies"],
+                              "PUT", endpoint, rollback, precondition_state=precondition(state))
+
+            def verify(_):
+                after = read_state()
+                target_ok = after["target"] == proposed
+                unrelated_before = [r for r in state["port_forwards"] if object_id(r) != identifier]
+                unrelated_after = [r for r in after["port_forwards"] if object_id(r) != identifier]
+                forwards_ok = _stable_collection(unrelated_before) == _stable_collection(unrelated_after)
+                before_related = _related(state["firewall_policies"], target)
+                before_ids = {object_id(r) for r in before_related}
+                after_related = [r for r in after["firewall_policies"]
+                                 if object_id(r) in before_ids or r in _related(after["firewall_policies"], target)
+                                 or r in _related(after["firewall_policies"], proposed)]
+                generated_ok = len(before_related) == len(after_related)
+                if any(str(old_ip) in _recursive_values(r) for r in before_related):
+                    generated_ok = generated_ok and bool(after_related) and all(
+                        str(old_ip) not in _recursive_values(r) and str(ip) in _recursive_values(r)
+                        for r in after_related)
+                def replaced(value):
+                    if isinstance(value, dict): return {k: replaced(v) for k, v in value.items()}
+                    if isinstance(value, list): return [replaced(v) for v in value]
+                    return str(ip) if value == str(old_ip) else value
+                generated_ok = generated_ok and all(
+                    sum(_policy_semantic_matches(actual, replaced(before)) for actual in after_related) == 1
+                    for before in before_related)
+                after_ids = {object_id(r) for r in after_related}
+                policies_ok = _stable_collection([r for r in state["firewall_policies"] if object_id(r) not in before_ids], ordered=True) == _stable_collection(
+                    [r for r in after["firewall_policies"] if object_id(r) not in after_ids], ordered=True)
+                status_before = _related(state["forwarding_status"], target)
+                status_after = _related(after["forwarding_status"], proposed)
+                status_ok = len(status_before) == len(status_after)
+                if any(str(old_ip) in _recursive_values(r) for r in status_before):
+                    status_ok = status_ok and bool(status_after) and all(str(old_ip) not in _recursive_values(r)
+                                                                         and str(ip) in _recursive_values(r) for r in status_after)
+                return {"verified": target_ok and forwards_ok and policies_ok and generated_ok and status_ok,
+                        "target_matches": target_ok, "unrelated_forwards_unchanged": forwards_ok,
+                        "unrelated_state_unchanged": forwards_ok and policies_ok,
+                        "generated_policy_destination_matches": generated_ok,
+                        "forwarding_status_destination_matches": status_ok,
+                        "external_reachability_tested": False}
+            return self._finish(plan, dry_run=dry_run, approval=approval, freshness=read_state,
+                                precondition=precondition, write=lambda: self._write("PUT", endpoint, proposed),
+                                verify=verify, reconciliation_attempts=4, reconciliation_delay=2.0)
+
+    def port_forward_revert(self, snapshot_path: Path, *, dry_run: bool = True,
+                            approval: str | None = None) -> dict[str, Any]:
+        manifest, original = load_snapshot(snapshot_path, expected_type="port-forward-update",
+                                            expected_identity=self.identity.as_dict())
+        return self.port_forward_update(object_id(original), original["fwd"], dry_run=dry_run,
+                                        approval=approval, _restore_snapshot=snapshot_path)
 
     def port_forward_delete(self, identifier: str, *, expected: dict[str, Any] | None = None,
                             dry_run: bool = True, approval: str | None = None) -> dict[str, Any]:

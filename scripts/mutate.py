@@ -53,6 +53,14 @@ def parser() -> argparse.ArgumentParser:
     delete.add_argument("--id", required=True)
     delete.add_argument("--expect", action="append", default=[], metavar="FIELD=VALUE")
     _approval(delete)
+    update_pf = pf_actions.add_parser("update", help="change only the destination IPv4 address of one existing forward")
+    update_pf.add_argument("--id", required=True)
+    update_pf.add_argument("--forward-ip", required=True)
+    update_pf.add_argument("--expect", action="append", default=[], metavar="FIELD=VALUE")
+    _approval(update_pf)
+    revert_pf = pf_actions.add_parser("revert", help="separately approved inverse of a destination-IP update")
+    revert_pf.add_argument("--snapshot", required=True, type=Path)
+    _approval(revert_pf)
     restore = pf_actions.add_parser("restore")
     restore.add_argument("--snapshot", required=True, type=Path)
     _approval(restore)
@@ -156,6 +164,11 @@ def main() -> None:
         if args.resource == "port-forward" and args.action == "delete":
             result = mutator.port_forward_delete(args.id, expected=_expected(args.expect),
                                                   dry_run=dry_run, approval=approval)
+        elif args.resource == "port-forward" and args.action == "update":
+            result = mutator.port_forward_update(args.id, args.forward_ip, expected=_expected(args.expect),
+                                                dry_run=dry_run, approval=approval)
+        elif args.resource == "port-forward" and args.action == "revert":
+            result = mutator.port_forward_revert(args.snapshot, dry_run=dry_run, approval=approval)
         elif args.resource == "port-forward":
             result = mutator.port_forward_restore(args.snapshot, dry_run=dry_run, approval=approval)
         elif args.resource == "client":

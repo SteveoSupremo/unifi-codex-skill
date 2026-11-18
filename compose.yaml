@@ -1,0 +1,24 @@
+services:
+  unifi-mcp:
+    build: .
+    restart: unless-stopped
+    user: "${UNIFI_MCP_UID:-1000}:${UNIFI_MCP_GID:-1000}"
+    environment:
+      UNIFI_ENABLE_WRITES: disabled
+      UNIFI_MCP_BIND: container
+    volumes:
+      - ./.env:/app/.env:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1.0
+    networks:
+      webui:
+        aliases: [unifi-mcp]
+    # No published ports. Reachable only on the attached Docker network.
+networks:
+  webui:
+    external: true
+    name: "${UNIFI_MCP_DOCKER_NETWORK:-open-webui_default}"

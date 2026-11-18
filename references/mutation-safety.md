@@ -147,6 +147,11 @@ token.
 
 ## Local DNS Host (A) records
 
+Port-forward destination updates use the same Level 3 gate. See
+[port-forward-updates.md](port-forward-updates.md) for the Network 10.6.106-only,
+same-LAN full-object PUT and separately approved inverse operation. Other fields and
+unrelated forwards/policies are preserved; generated rules are verified, never edited.
+
 `mutate.py dns` is Level 3 and supports only individual USER_DEFINED A_RECORD policies
 on exact reviewed Network releases 10.1.84, 10.5.67, 10.6.106 and 10.6.109. It uses official
 Integration v1 DNS Policies, never private `static-dns` mutation. See

@@ -1,0 +1,11 @@
+**
+!Dockerfile
+!requirements-mcp.txt
+!scripts/
+!scripts/**
+!references/
+!references/**
+!tests/
+!tests/**
+**/__pycache__/
+**/*.pyc
