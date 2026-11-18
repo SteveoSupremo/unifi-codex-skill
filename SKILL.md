@@ -68,3 +68,8 @@ unavailable without terminating collection or exposing raw controller error bodi
 - Never call `UDMClient.post`, `put`, `delete`, `guarded_write`, or another low-level mutation method directly. Supported writes must originate in `mutationlib.py` through `scripts/mutate.py`; ambiguous writes are reconciled by GET and never retried automatically.
 
 Never put credentials, raw sensitive inventory, reports, or snapshots into Git.
+
+For scheduled Internet isolation, use `scripts/mutate.py overnight --plan --mac MAC`
+(repeat the MAC option for each confirmed device). Read
+[overnight restrictions](references/overnight.md) before interpreting the candidates
+or planning native group maintenance. The assessment uses only GETs.

@@ -435,6 +435,40 @@ class MutationTests(unittest.TestCase):
             with self.subTest(field=label):
                 self.assertNotEqual(base["approval_token"], plan["approval_token"])
 
+    def test_unverified_overnight_and_invalid_clock_refused_in_gate(self):
+        client = FakeMutationClient()
+        for start in ("20:00", "77:77"):
+            desired = self._apple_policy()
+            desired["schedule"] = {"mode": "EVERY_DAY", "timeFilter": {"startTime": start, "stopTime": "11:00"}}
+            with self.assertRaises(ValidationError):
+                self.mutator(client).firewall_policy_create(desired, dry_run=False, approval="invalid")
+        self.assertFalse(any(call[0] in {"POST", "PUT", "DELETE"} for call in client.calls))
+
+    def test_scheduled_mac_policy_approval_and_separately_guarded_inverse(self):
+        client = FirewallCreateResponseClient("201")
+        before = copy.deepcopy(client.policies)
+        mutator = self.mutator(client, {"UNIFI_ENABLE_WRITES": WRITE_PHRASE})
+        desired = self._apple_policy()
+        desired["schedule"] = {"mode": "EVERY_DAY", "timeFilter": {"startTime": "08:00", "stopTime": "11:00"}}
+        desired["source"]["trafficFilter"] = {"type": "MAC_ADDRESS", "macAddressFilter": {
+            "macAddresses": ["02:00:00:00:00:01"]}}
+        token = mutator.firewall_policy_create(desired)["plan"]["approval_token"]
+        for key in ("schedule", "source"):
+            changed = copy.deepcopy(desired)
+            if key == "source":
+                changed[key].pop("trafficFilter")
+            else:
+                changed[key]["timeFilter"]["startTime"] = "09:00"
+            with self.assertRaises(PermissionError):
+                mutator.firewall_policy_create(changed, dry_run=False, approval=token)
+        self.assertEqual(mutator.firewall_policy_create(desired, dry_run=False, approval=token)["mode"], "APPLIED")
+        identifier = client.policies[-1]["id"]
+        inverse = mutator.firewall_policy_delete(identifier)["plan"]["approval_token"]
+        with self.assertRaises(PermissionError):
+            mutator.firewall_policy_delete(identifier, dry_run=False, approval=token)
+        mutator.firewall_policy_delete(identifier, dry_run=False, approval=inverse)
+        self.assertEqual(client.policies, before)
+
     def test_firewall_create_update_delete_dry_run(self):
         cases = [
             ("create", lambda m: m.firewall_policy_create(

@@ -203,3 +203,9 @@ HAS OCCURRED.`
 Execution JSON includes a `completion_block` with whether mutation was attempted,
 authoritative write count, ambiguity status, verification, unrelated-state result,
 rollback availability, and operation-record path.
+
+Firewall CREATE approval and semantic readback include the source MAC filter and
+schedule. Introducing a cross-midnight or equal-time time filter is refused while
+the installed scheduler's rollover semantics are unverified. GET-only overnight
+assessment can still display candidate fields for review. See
+[overnight restrictions](overnight.md) for capability and rollback boundaries.

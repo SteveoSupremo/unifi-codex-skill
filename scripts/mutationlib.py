@@ -8,6 +8,7 @@ gate, and tests inject a transport so no controller is contacted.
 from __future__ import annotations
 
 import copy
+import re
 import fcntl
 import hashlib
 import ipaddress
@@ -369,6 +370,8 @@ def _policy_semantic_projection(policy: dict[str, Any]) -> dict[str, Any]:
         "action": str(action.get("type") or "").upper(),
         "allow_return_traffic": action.get("allowReturnTraffic") is True,
         "source_zone": str(source.get("zoneId") or ""),
+        "schedule": policy.get("schedule"),
+        "source_mac_filter": (source.get("trafficFilter") or {}).get("macAddressFilter"),
         "source_networks": _nested_filter_values(source, "networkFilter", "networkIds"),
         "source_addresses": _nested_filter_values(source, "ipAddressFilter", "values"),
         "destination_zone": str(destination.get("zoneId") or ""),
@@ -520,6 +523,22 @@ def _collect_named_refs(value: Any, singular: str, plural: str) -> set[str]:
         for child in value:
             found.update(_collect_named_refs(child, singular, plural))
     return found
+
+
+def _validate_new_schedule(policy: dict[str, Any]) -> None:
+    schedule = policy.get("schedule")
+    if schedule is not None:
+        if not isinstance(schedule, dict):
+            raise ValidationError("invalid firewall schedule")
+        times = schedule.get("timeFilter")
+        if times is not None:
+            if not isinstance(times, dict) or any(
+                not re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", str(times.get(k, "")))
+                for k in ("startTime", "stopTime")
+            ):
+                raise ValidationError("invalid firewall schedule time")
+            if times["stopTime"] <= times["startTime"]:
+                raise ValidationError("cross-midnight and equal-time semantics are unverified on this build")
 
 
 def validate_policy(policy: dict[str, Any], zones: list[dict[str, Any]], networks: list[dict[str, Any]],
@@ -1678,6 +1697,7 @@ class GuardedMutator:
                 validate_policy(current, zones, networks)
             if action == "create":
                 proposed = _strip_keys(copy.deepcopy(payload), IDENTITY_KEYS | VOLATILE_KEYS)
+                _validate_new_schedule(proposed)
                 create_payload = serialize_firewall_policy_create(proposed)
                 before = approved_state
                 validation = validate_policy(proposed, zones, networks, require_index=False)
@@ -1694,6 +1714,8 @@ class GuardedMutator:
                 if not isinstance(payload, dict):
                     raise ValidationError("firewall update requires a JSON object of changes")
                 proposed = _deep_merge(current, payload)
+                if proposed.get("schedule") != current.get("schedule"):
+                    _validate_new_schedule(proposed)
                 before = current
                 validation = validate_policy(proposed, zones, networks)
                 snapshot_value = _policy_snapshot(policies, current, zones)

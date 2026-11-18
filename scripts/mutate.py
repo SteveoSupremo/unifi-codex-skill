@@ -47,6 +47,9 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description="Guarded UniFi configuration mutations")
     resources = root.add_subparsers(dest="resource", required=True)
 
+    overnight = resources.add_parser("overnight", help="GET-only scheduled Internet restriction assessment")
+    overnight.add_argument("--plan", action="store_true", required=True)
+    overnight.add_argument("--mac", action="append", required=True)
     pf = resources.add_parser("port-forward")
     pf_actions = pf.add_subparsers(dest="action", required=True)
     delete = pf_actions.add_parser("delete")
@@ -152,6 +155,10 @@ def main() -> None:
     client = UDMClient(env["UDM_HOST"], env["UNIFI_API_KEY"])
     try:
         override = env.get("UNIFI_SITE") or None
+        if args.resource == "overnight":
+            from overnight import discover
+            print(json.dumps(discover(client, override, args.mac), indent=2))
+            return
         identity = _controller_identity(client, env["UDM_HOST"], override)
         mutator = GuardedMutator(client, site_id=identity.site_id,
                                  internal_site=identity.internal_reference, env=env,
